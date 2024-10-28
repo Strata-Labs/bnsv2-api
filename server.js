@@ -42,7 +42,7 @@ await fastify.register(rateLimit, {
   allowList: ["127.0.0.1"],
 });
 
-fastify.get("/api/burn-block", async (request, reply) => {
+fastify.get("/burn-block", async (request, reply) => {
   try {
     const burnBlockHeight = await getCurrentBurnBlockHeight();
     reply.send({
@@ -55,7 +55,7 @@ fastify.get("/api/burn-block", async (request, reply) => {
 });
 
 // Get all names
-fastify.get("/api/names", async (request, reply) => {
+fastify.get("/names", async (request, reply) => {
   const { limit = 50, offset = 0 } = request.query;
   try {
     const currentBurnBlock = await getCurrentBurnBlockHeight();
@@ -76,7 +76,7 @@ fastify.get("/api/names", async (request, reply) => {
           ELSE false
         END as is_valid
        FROM names 
-       ORDER BY registered_at DESC
+       ORDER BY name_string || '.' || namespace_string ASC
        LIMIT $1 OFFSET $2`,
       [limit, offset, currentBurnBlock]
     );
@@ -95,7 +95,7 @@ fastify.get("/api/names", async (request, reply) => {
 });
 
 // Get only valid names
-fastify.get("/api/names/valid", async (request, reply) => {
+fastify.get("/names/valid", async (request, reply) => {
   const { limit = 50, offset = 0 } = request.query;
   try {
     const currentBurnBlock = await getCurrentBurnBlockHeight();
@@ -117,7 +117,7 @@ fastify.get("/api/names/valid", async (request, reply) => {
         stx_burn
        FROM names 
        WHERE renewal_height = 0 OR renewal_height > $3
-       ORDER BY registered_at DESC
+       ORDER BY name_string || '.' || namespace_string ASC
        LIMIT $1 OFFSET $2`,
       [limit, offset, currentBurnBlock]
     );
@@ -136,7 +136,7 @@ fastify.get("/api/names/valid", async (request, reply) => {
 });
 
 // Get names by owner with valid/invalid separation
-fastify.get("/api/names/owner/:address", async (request, reply) => {
+fastify.get("/names/owner/:address", async (request, reply) => {
   const { address } = request.params;
   const { limit = 50, offset = 0 } = request.query;
   try {
@@ -169,7 +169,7 @@ fastify.get("/api/names/owner/:address", async (request, reply) => {
        FROM names 
        WHERE owner = $1 
        AND (renewal_height = 0 OR renewal_height > $4)
-       ORDER BY registered_at DESC
+       ORDER BY name_string || '.' || namespace_string ASC
        LIMIT $2 OFFSET $3`,
       [address, limit, offset, currentBurnBlock]
     );
@@ -187,7 +187,7 @@ fastify.get("/api/names/owner/:address", async (request, reply) => {
        WHERE owner = $1 
        AND renewal_height != 0 
        AND renewal_height <= $4
-       ORDER BY registered_at DESC
+       ORDER BY name_string || '.' || namespace_string ASC
        LIMIT $2 OFFSET $3`,
       [address, limit, offset, currentBurnBlock]
     );
@@ -216,7 +216,7 @@ fastify.get("/api/names/owner/:address", async (request, reply) => {
   }
 });
 
-fastify.get("/api/namespaces", async (request, reply) => {
+fastify.get("/namespaces", async (request, reply) => {
   const { limit = 50, offset = 0 } = request.query;
   try {
     const currentBurnBlock = await getCurrentBurnBlockHeight();
@@ -236,7 +236,7 @@ fastify.get("/api/namespaces", async (request, reply) => {
         manager_transferable,
         can_update_price_function
        FROM namespaces 
-       ORDER BY launched_at DESC
+       ORDER BY namespace_string ASC
        LIMIT $1 OFFSET $2`,
       [limit, offset]
     );
@@ -254,7 +254,8 @@ fastify.get("/api/namespaces", async (request, reply) => {
   }
 });
 
-fastify.get("/api/namespaces/:namespace_string", async (request, reply) => {
+// Get all namespaces
+fastify.get("/namespaces/:namespace_string", async (request, reply) => {
   const { namespace_string } = request.params;
   try {
     const currentBurnBlock = await getCurrentBurnBlockHeight();
@@ -290,7 +291,45 @@ fastify.get("/api/namespaces/:namespace_string", async (request, reply) => {
   }
 });
 
-fastify.get("/api/names/:full_name", async (request, reply) => {
+// Get a single namespace
+fastify.get("/namespaces/:namespace_string", async (request, reply) => {
+  const { namespace_string } = request.params;
+  try {
+    const currentBurnBlock = await getCurrentBurnBlockHeight();
+
+    const namespaceResult = await pool.query(
+      `SELECT *
+       FROM namespaces 
+       WHERE namespace_string = $1`,
+      [namespace_string]
+    );
+
+    if (namespaceResult.rows.length === 0) {
+      return reply.status(404).send({ error: "Namespace not found" });
+    }
+
+    const namesCountResult = await pool.query(
+      `SELECT COUNT(*) 
+       FROM names 
+       WHERE namespace_string = $1`,
+      [namespace_string]
+    );
+
+    reply.send({
+      current_burn_block: currentBurnBlock,
+      data: {
+        ...namespaceResult.rows[0],
+        names_count: parseInt(namesCountResult.rows[0].count),
+      },
+    });
+  } catch (err) {
+    fastify.log.error(err);
+    reply.status(500).send({ error: "Internal Server Error" });
+  }
+});
+
+// Get a names details
+fastify.get("/names/:full_name", async (request, reply) => {
   const [name_string, namespace_string] = request.params.full_name.split(".");
   try {
     const currentBurnBlock = await getCurrentBurnBlockHeight();
@@ -330,7 +369,8 @@ fastify.get("/api/names/:full_name", async (request, reply) => {
   }
 });
 
-fastify.get("/api/names/namespace/:namespace", async (request, reply) => {
+// Get names by namespace
+fastify.get("/names/namespace/:namespace", async (request, reply) => {
   const { namespace } = request.params;
   const { limit = 50, offset = 0 } = request.query;
   try {
@@ -357,7 +397,7 @@ fastify.get("/api/names/namespace/:namespace", async (request, reply) => {
         END as is_valid
        FROM names 
        WHERE namespace_string = $1
-       ORDER BY registered_at DESC
+       ORDER BY name_string || '.' || namespace_string ASC
        LIMIT $2 OFFSET $3`,
       [namespace, limit, offset, currentBurnBlock]
     );

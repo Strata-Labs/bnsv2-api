@@ -34,6 +34,7 @@ storybook-static
 /.pnp
 .pnp.js
 .yarn/install-state.gz
+yarn.lock
 
 # testing
 /coverage
