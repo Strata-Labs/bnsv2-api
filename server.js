@@ -216,6 +216,7 @@ fastify.get("/names/owner/:address", async (request, reply) => {
   }
 });
 
+// Get all namespaces
 fastify.get("/namespaces", async (request, reply) => {
   const { limit = 50, offset = 0 } = request.query;
   try {
@@ -247,43 +248,6 @@ fastify.get("/namespaces", async (request, reply) => {
       limit: parseInt(limit),
       offset: parseInt(offset),
       namespaces: result.rows,
-    });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
-
-// Get all namespaces
-fastify.get("/namespaces/:namespace_string", async (request, reply) => {
-  const { namespace_string } = request.params;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
-
-    const namespaceResult = await pool.query(
-      `SELECT *
-       FROM namespaces 
-       WHERE namespace_string = $1`,
-      [namespace_string]
-    );
-
-    if (namespaceResult.rows.length === 0) {
-      return reply.status(404).send({ error: "Namespace not found" });
-    }
-
-    const namesCountResult = await pool.query(
-      `SELECT COUNT(*) 
-       FROM names 
-       WHERE namespace_string = $1`,
-      [namespace_string]
-    );
-
-    reply.send({
-      current_burn_block: currentBurnBlock,
-      data: {
-        ...namespaceResult.rows[0],
-        names_count: parseInt(namesCountResult.rows[0].count),
-      },
     });
   } catch (err) {
     fastify.log.error(err);
