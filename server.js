@@ -23,7 +23,7 @@ const pool = new Pool({
 async function getCurrentBurnBlockHeight() {
   try {
     const response = await fetch(
-      `https://leather.granite.world/extended/v2/burn-blocks?limit=1`
+      `https://api.hiro.so/extended/v2/burn-blocks?limit=1`
     );
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
