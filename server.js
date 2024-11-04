@@ -11,19 +11,16 @@ const fastify = Fastify({
   logger: true,
 });
 
-// Single CORS configuration, keep it simple
+// Single, simple CORS configuration
 await fastify.register(cors, {
   origin: "*",
-  methods: ["GET", "OPTIONS"],
-  allowedHeaders: ["Content-Type"],
-  preflightContinue: false,
-  preflight: true,
+  methods: ["GET"],
+  credentials: false,
 });
 
-// Optional: Add logging hook to help debug if needed
+// Just add a debug hook to see what's happening
 fastify.addHook("onSend", async (request, reply) => {
-  console.log("Request headers:", request.headers);
-  console.log("Response headers:", reply.getHeaders());
+  console.log("Final response headers:", reply.getHeaders());
 });
 
 const { Pool } = pg;
