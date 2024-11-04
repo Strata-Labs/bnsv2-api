@@ -11,10 +11,13 @@ const fastify = Fastify({
   logger: true,
 });
 
+// Single CORS configuration through the plugin
 await fastify.register(cors, {
   origin: true,
   methods: ["GET"],
-  credentials: false,
+  allowedHeaders: ["Content-Type"],
+  exposedHeaders: ["Content-Range", "X-Content-Range"],
+  strictPreflight: true, // This ensures strict CORS handling
 });
 
 fastify.addHook("onSend", async (request, reply) => {
@@ -674,7 +677,6 @@ fastify.get("/resolve-name/:full_name", async (request, reply) => {
   try {
     const currentBurnBlock = await getCurrentBurnBlockHeight();
 
-    // Query for both zonefile and owner
     const result = await pool.query(
       `SELECT zonefile, owner
        FROM names 
@@ -687,10 +689,7 @@ fastify.get("/resolve-name/:full_name", async (request, reply) => {
     );
 
     if (result.rows.length === 0) {
-      return reply
-        .code(404)
-        .header("Access-Control-Allow-Origin", "*")
-        .send({ error: "Name not found or invalid" });
+      return reply.code(404).send({ error: "Name not found or invalid" });
     }
 
     const { zonefile, owner } = result.rows[0];
@@ -699,40 +698,26 @@ fastify.get("/resolve-name/:full_name", async (request, reply) => {
     if (!decodedZonefile) {
       return reply
         .code(404)
-        .header("Access-Control-Allow-Origin", "*")
         .send({ error: "No zonefile found or unable to decode" });
     }
 
     // Validate zonefile structure
     if (!isValidZonefileFormat(decodedZonefile)) {
-      return reply
-        .code(400)
-        .header("Access-Control-Allow-Origin", "*")
-        .send({ error: "Invalid zonefile format" });
+      return reply.code(400).send({ error: "Invalid zonefile format" });
     }
 
     // Check if owners match
     if (decodedZonefile.owner !== owner) {
-      return reply
-        .code(400)
-        .header("Access-Control-Allow-Origin", "*")
-        .send({ error: "Zonefile needs to be updated" });
+      return reply.code(400).send({ error: "Zonefile needs to be updated" });
     }
 
-    // Successful response
-    return reply
-      .code(200)
-      .header("Access-Control-Allow-Origin", "*")
-      .header("Access-Control-Allow-Methods", "GET")
-      .send({
-        zonefile: decodedZonefile,
-      });
+    // Send response without manually setting CORS headers
+    return reply.send({
+      zonefile: decodedZonefile,
+    });
   } catch (err) {
     fastify.log.error(err);
-    return reply
-      .code(500)
-      .header("Access-Control-Allow-Origin", "*")
-      .send({ error: "Internal Server Error" });
+    return reply.code(500).send({ error: "Internal Server Error" });
   }
 });
 
