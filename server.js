@@ -3,7 +3,6 @@ import pg from "pg";
 import rateLimit from "@fastify/rate-limit";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
-import Fastify from "fastify";
 import cors from "@fastify/cors";
 
 dotenv.config();
