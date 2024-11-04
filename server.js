@@ -7,13 +7,28 @@ import cors from "@fastify/cors";
 
 dotenv.config();
 
-const fastify = Fastify({ logger: true });
+const fastify = Fastify({
+  logger: true,
+  // Disable Fastify's default cors to avoid double headers
+  disableRequestLogging: true,
+});
 
+// Register CORS plugin only once
 await fastify.register(cors, {
   origin: "*",
   methods: ["GET"],
   allowedHeaders: ["Content-Type"],
+  exposedHeaders: ["Content-Range", "X-Content-Range"],
+  credentials: false,
+  maxAge: 86400,
   preflight: false,
+});
+
+fastify.addHook("onSend", async (request, reply) => {
+  const origins = reply.getHeader("Access-Control-Allow-Origin");
+  if (Array.isArray(origins)) {
+    reply.header("Access-Control-Allow-Origin", "*");
+  }
 });
 
 const { Pool } = pg;
