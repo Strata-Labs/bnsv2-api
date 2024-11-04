@@ -3,10 +3,20 @@ import pg from "pg";
 import rateLimit from "@fastify/rate-limit";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
+import Fastify from "fastify";
+import cors from "@fastify/cors";
 
 dotenv.config();
 
 const fastify = Fastify({ logger: true });
+
+await fastify.register(cors, {
+  origin: "*",
+  methods: ["GET"],
+  allowedHeaders: ["Content-Type"],
+  preflight: false,
+});
+
 const { Pool } = pg;
 
 const pool = new Pool({
@@ -696,6 +706,66 @@ fastify.get("/resolve-name/:full_name", async (request, reply) => {
 
     reply.send({
       zonefile: decodedZonefile,
+    });
+  } catch (err) {
+    fastify.log.error(err);
+    reply.status(500).send({ error: "Internal Server Error" });
+  }
+});
+
+// 13. Get a Namespace
+fastify.get("/namespaces/:namespace", async (request, reply) => {
+  const { namespace } = request.params;
+  try {
+    const currentBurnBlock = await getCurrentBurnBlockHeight();
+
+    const result = await pool.query(
+      `SELECT 
+        namespace_string,
+        launched_at,
+        lifetime,
+        namespace_manager,
+        price_function_base,
+        price_function_coeff,
+        price_function_buckets,
+        price_function_no_vowel_discount,
+        price_function_nonalpha_discount,
+        manager_transferable,
+        can_update_price_function,
+        (SELECT COUNT(*) FROM names WHERE names.namespace_string = namespaces.namespace_string) as total_names,
+        (SELECT COUNT(*) 
+         FROM names 
+         WHERE names.namespace_string = namespaces.namespace_string 
+         AND (renewal_height = 0 OR renewal_height > $2)
+         AND revoked = false) as active_names,
+        (SELECT COUNT(*) 
+         FROM names 
+         WHERE names.namespace_string = namespaces.namespace_string 
+         AND renewal_height != 0 
+         AND renewal_height <= $2
+         AND revoked = false) as expired_names,
+        (SELECT COUNT(*) 
+         FROM names 
+         WHERE names.namespace_string = namespaces.namespace_string 
+         AND revoked = true) as revoked_names,
+        (SELECT MIN(registered_at) 
+         FROM names 
+         WHERE names.namespace_string = namespaces.namespace_string) as first_registration,
+        (SELECT MAX(registered_at) 
+         FROM names 
+         WHERE names.namespace_string = namespaces.namespace_string) as last_registration
+       FROM namespaces 
+       WHERE namespace_string = $1`,
+      [namespace, currentBurnBlock]
+    );
+
+    if (result.rows.length === 0) {
+      return reply.status(404).send({ error: "Namespace not found" });
+    }
+
+    reply.send({
+      current_burn_block: currentBurnBlock,
+      namespace: result.rows[0],
     });
   } catch (err) {
     fastify.log.error(err);
