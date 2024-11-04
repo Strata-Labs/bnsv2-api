@@ -11,48 +11,16 @@ const fastify = Fastify({
   logger: true,
 });
 
-// Hook to clean any existing CORS headers
-fastify.addHook("onRequest", async (request, reply) => {
-  // Clear any existing CORS headers
-  reply.headers({
-    "Access-Control-Allow-Origin": null,
-    "Access-Control-Allow-Methods": null,
-    "Access-Control-Allow-Headers": null,
-    "Access-Control-Expose-Headers": null,
-    "Access-Control-Allow-Credentials": null,
-  });
-});
-
-// Basic CORS configuration
+// Single CORS configuration, keep it simple
 await fastify.register(cors, {
   origin: "*",
-  methods: ["GET"],
-  credentials: false,
-  preflight: false,
-  strictPreflight: false,
-  hooks: {
-    preHandler: (request, reply, done) => {
-      // Ensure only one Access-Control-Allow-Origin header
-      reply.header("Access-Control-Allow-Origin", "*");
-      done();
-    },
-  },
+  methods: ["GET", "OPTIONS"],
+  allowedHeaders: ["Content-Type"],
+  preflightContinue: false,
+  preflight: true,
 });
 
-// Also clean up headers before sending
-fastify.addHook("onSend", async (request, reply) => {
-  const corsHeaders = Object.keys(reply.getHeaders()).filter((header) =>
-    header.toLowerCase().startsWith("access-control-")
-  );
-
-  // Remove all CORS headers
-  corsHeaders.forEach((header) => reply.removeHeader(header));
-
-  // Set just the ones we want
-  reply.header("Access-Control-Allow-Origin", "*");
-  reply.header("Access-Control-Allow-Methods", "GET");
-});
-
+// Optional: Add logging hook to help debug if needed
 fastify.addHook("onSend", async (request, reply) => {
   console.log("Request headers:", request.headers);
   console.log("Response headers:", reply.getHeaders());
