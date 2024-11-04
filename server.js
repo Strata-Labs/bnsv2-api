@@ -687,16 +687,16 @@ fastify.get("/resolve-name/:full_name", async (request, reply) => {
     );
 
     if (result.rows.length === 0) {
-      return reply.code(404).send({ error: "Name not found or invalid" });
+      return reply
+        .code(404)
+        .send({ error: "Name not found, expired or revoked" });
     }
 
     const { zonefile, owner } = result.rows[0];
     const decodedZonefile = decodeZonefile(zonefile);
 
     if (!decodedZonefile) {
-      return reply
-        .code(404)
-        .send({ error: "No zonefile found or unable to decode" });
+      return reply.code(404).send({ error: "No zonefile found" });
     }
 
     // Validate zonefile structure
