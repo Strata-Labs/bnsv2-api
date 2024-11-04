@@ -11,13 +11,12 @@ const fastify = Fastify({
   logger: true,
 });
 
-// Single CORS configuration through the plugin
 await fastify.register(cors, {
-  origin: true,
+  origin: "*",
   methods: ["GET"],
   allowedHeaders: ["Content-Type"],
   exposedHeaders: ["Content-Range", "X-Content-Range"],
-  strictPreflight: true, // This ensures strict CORS handling
+  strictPreflight: true,
 });
 
 fastify.addHook("onSend", async (request, reply) => {
