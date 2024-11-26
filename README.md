@@ -3,6 +3,7 @@
 Base URL: `https://api.bnsv2.com`
 
 For all testnet calls preppend to the endpoint /testnet
+
 Ex.
 
 ```http
