@@ -14,8 +14,10 @@ await fastify.register(cors, {
   methods: ["GET"],
 });
 
-fastify.addHook("onSend", async (request, reply) => {
-  console.log("Final response headers:", reply.getHeaders());
+await fastify.register(rateLimit, {
+  max: 10000,
+  timeWindow: "1 minute",
+  allowList: ["127.0.0.1"],
 });
 
 const { Pool } = pg;
@@ -30,6 +32,64 @@ const pool = new Pool({
     rejectUnauthorized: false,
   },
 });
+
+// Network configurations
+const NETWORK_CONFIG = {
+  mainnet: {
+    schema: "public",
+    apiUrl: "https://api.hiro.so",
+    contract: "SP2QEZ06AGJ3RKJPBV14SY1V5BBFNAW33D96YPGZF.BNS-V2",
+  },
+  testnet: {
+    schema: "testnet",
+    apiUrl: "https://api.testnet.hiro.so",
+    contract: "ST2QEZ06AGJ3RKJPBV14SY1V5BBFNAW33D9SZJQ0M.BNS-V2",
+  },
+};
+
+// Common handler factory
+function createNetworkHandler(handler) {
+  return async (request, reply) => {
+    const network = request.url.startsWith("/testnet/") ? "testnet" : "mainnet";
+    const { schema, apiUrl } = NETWORK_CONFIG[network];
+
+    try {
+      return await handler(request, reply, { schema, network, apiUrl });
+    } catch (error) {
+      fastify.log.error(error);
+      reply.status(500).send({ error: "Internal Server Error" });
+    }
+  };
+}
+
+// Helper functions
+async function getCurrentBurnBlockHeight(network) {
+  const config = NETWORK_CONFIG[network];
+  const response = await fetch(
+    `${config.apiUrl}/extended/v2/burn-blocks?limit=1`
+  );
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+  const data = await response.json();
+  return data.results[0].burn_block_height;
+}
+
+function decodeZonefile(zonefileHex) {
+  if (!zonefileHex) return null;
+  try {
+    const hex = zonefileHex.replace("0x", "");
+    const decoded = Buffer.from(hex, "hex").toString("utf8");
+    try {
+      return JSON.parse(decoded);
+    } catch {
+      return decoded;
+    }
+  } catch (error) {
+    fastify.log.error("Error decoding zonefile:", error);
+    return null;
+  }
+}
 
 function isValidZonefileFormat(zonefile) {
   try {
@@ -52,15 +112,12 @@ function isValidZonefileFormat(zonefile) {
       }
     }
 
-    // Validate subdomains array
     if (!Array.isArray(zonefile.subdomains)) {
       return false;
     }
 
-    // If subdomains exist, validate each subdomain's structure
     for (let i = 0; i < zonefile.subdomains.length; i++) {
       const subdomain = zonefile.subdomains[i];
-
       const required_subdomain_fields = [
         "name",
         "sequence",
@@ -75,7 +132,6 @@ function isValidZonefileFormat(zonefile) {
         }
       }
 
-      // Validate sequence is a number
       if (typeof subdomain.sequence !== "number") {
         return false;
       }
@@ -87,54 +143,16 @@ function isValidZonefileFormat(zonefile) {
   }
 }
 
-async function getCurrentBurnBlockHeight() {
-  try {
-    const response = await fetch(
-      `https://api.hiro.so/extended/v2/burn-blocks?limit=1`
+// Route handlers
+const handlers = {
+  // 1. Get all names
+  getAllNames: async (request, reply, { schema, network }) => {
+    const { limit = 50, offset = 0 } = request.query;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM ${schema}.names`
     );
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    const data = await response.json();
-    return data.results[0].burn_block_height;
-  } catch (error) {
-    fastify.log.error("Error fetching burn block height:", error);
-    throw error;
-  }
-}
-
-function decodeZonefile(zonefileHex) {
-  if (!zonefileHex) return null;
-  try {
-    const hex = zonefileHex.replace("0x", "");
-    // Convert hex to string
-    const decoded = Buffer.from(hex, "hex").toString("utf8");
-
-    // Try to parse as JSON
-    try {
-      return JSON.parse(decoded);
-    } catch {
-      // If not JSON, return as plain text
-      return decoded;
-    }
-  } catch (error) {
-    fastify.log.error("Error decoding zonefile:", error);
-    return null;
-  }
-}
-
-await fastify.register(rateLimit, {
-  max: 10000,
-  timeWindow: "1 minute",
-  allowList: ["127.0.0.1"],
-});
-
-// 1. Get all names regardless of status
-fastify.get("/names", async (request, reply) => {
-  const { limit = 50, offset = 0 } = request.query;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
-    const countResult = await pool.query("SELECT COUNT(*) FROM names");
 
     const result = await pool.query(
       `SELECT 
@@ -150,33 +168,29 @@ fastify.get("/names", async (request, reply) => {
           WHEN renewal_height > $3 THEN true
           ELSE false
         END as is_valid
-       FROM names 
+       FROM ${schema}.names 
        ORDER BY name_string || '.' || namespace_string ASC
        LIMIT $1 OFFSET $2`,
       [limit, offset, currentBurnBlock]
     );
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       total: parseInt(countResult.rows[0].count),
       current_burn_block: currentBurnBlock,
       limit: parseInt(limit),
       offset: parseInt(offset),
       names: result.rows,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 2. Get only valid names (not expired, not revoked)
-fastify.get("/names/valid", async (request, reply) => {
-  const { limit = 50, offset = 0 } = request.query;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 2. Get only valid names
+  getValidNames: async (request, reply, { schema, network }) => {
+    const { limit = 50, offset = 0 } = request.query;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const countResult = await pool.query(
-      `SELECT COUNT(*) FROM names 
+      `SELECT COUNT(*) FROM ${schema}.names 
        WHERE revoked = false 
        AND (renewal_height = 0 OR renewal_height > $1)`,
       [currentBurnBlock]
@@ -192,7 +206,7 @@ fastify.get("/names/valid", async (request, reply) => {
         renewal_height,
         stx_burn,
         revoked
-       FROM names 
+       FROM ${schema}.names 
        WHERE revoked = false
        AND (renewal_height = 0 OR renewal_height > $3)
        ORDER BY name_string || '.' || namespace_string ASC
@@ -201,26 +215,22 @@ fastify.get("/names/valid", async (request, reply) => {
     );
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       total: parseInt(countResult.rows[0].count),
       current_burn_block: currentBurnBlock,
       limit: parseInt(limit),
       offset: parseInt(offset),
       names: result.rows,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 3. Get expired names
-fastify.get("/names/expired", async (request, reply) => {
-  const { limit = 50, offset = 0 } = request.query;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 3. Get expired names
+  getExpiredNames: async (request, reply, { schema, network }) => {
+    const { limit = 50, offset = 0 } = request.query;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const countResult = await pool.query(
-      `SELECT COUNT(*) FROM names 
+      `SELECT COUNT(*) FROM ${schema}.names 
        WHERE renewal_height != 0 
        AND renewal_height <= $1 
        AND revoked = false`,
@@ -235,8 +245,8 @@ fastify.get("/names/expired", async (request, reply) => {
         owner,
         registered_at,
         renewal_height,
-        stx_burn,
-       FROM names 
+        stx_burn
+       FROM ${schema}.names 
        WHERE renewal_height != 0 
        AND renewal_height <= $3
        AND revoked = false
@@ -246,26 +256,22 @@ fastify.get("/names/expired", async (request, reply) => {
     );
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       total: parseInt(countResult.rows[0].count),
       current_burn_block: currentBurnBlock,
       limit: parseInt(limit),
       offset: parseInt(offset),
       names: result.rows,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 4. Get revoked names
-fastify.get("/names/revoked", async (request, reply) => {
-  const { limit = 50, offset = 0 } = request.query;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 4. Get revoked names
+  getRevokedNames: async (request, reply, { schema, network }) => {
+    const { limit = 50, offset = 0 } = request.query;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const countResult = await pool.query(
-      `SELECT COUNT(*) FROM names WHERE revoked = true`
+      `SELECT COUNT(*) FROM ${schema}.names WHERE revoked = true`
     );
 
     const result = await pool.query(
@@ -276,8 +282,8 @@ fastify.get("/names/revoked", async (request, reply) => {
         owner,
         registered_at,
         renewal_height,
-        stx_burn,
-       FROM names 
+        stx_burn
+       FROM ${schema}.names 
        WHERE revoked = true
        ORDER BY name_string || '.' || namespace_string ASC
        LIMIT $1 OFFSET $2`,
@@ -285,27 +291,23 @@ fastify.get("/names/revoked", async (request, reply) => {
     );
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       total: parseInt(countResult.rows[0].count),
       current_burn_block: currentBurnBlock,
       limit: parseInt(limit),
       offset: parseInt(offset),
       names: result.rows,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 5. Get valid names for an address
-fastify.get("/names/address/:address/valid", async (request, reply) => {
-  const { address } = request.params;
-  const { limit = 50, offset = 0 } = request.query;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 5. Get valid names for an address
+  getValidNamesByAddress: async (request, reply, { schema, network }) => {
+    const { address } = request.params;
+    const { limit = 50, offset = 0 } = request.query;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const countResult = await pool.query(
-      `SELECT COUNT(*) FROM names 
+      `SELECT COUNT(*) FROM ${schema}.names 
        WHERE owner = $1 
        AND revoked = false
        AND (renewal_height = 0 OR renewal_height > $2)`,
@@ -322,7 +324,7 @@ fastify.get("/names/address/:address/valid", async (request, reply) => {
         renewal_height,
         stx_burn,
         revoked
-       FROM names 
+       FROM ${schema}.names 
        WHERE owner = $1 
        AND revoked = false
        AND (renewal_height = 0 OR renewal_height > $4)
@@ -332,27 +334,22 @@ fastify.get("/names/address/:address/valid", async (request, reply) => {
     );
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       total: parseInt(countResult.rows[0].count),
       current_burn_block: currentBurnBlock,
       limit: parseInt(limit),
       offset: parseInt(offset),
       names: result.rows,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
-
-// 6. Get expired names for an address
-fastify.get("/names/address/:address/expired", async (request, reply) => {
-  const { address } = request.params;
-  const { limit = 50, offset = 0 } = request.query;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  },
+  // 6. Get expired names for an address
+  getExpiredNamesByAddress: async (request, reply, { schema, network }) => {
+    const { address } = request.params;
+    const { limit = 50, offset = 0 } = request.query;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const countResult = await pool.query(
-      `SELECT COUNT(*) FROM names 
+      `SELECT COUNT(*) FROM ${schema}.names 
        WHERE owner = $1 
        AND revoked = false
        AND renewal_height != 0 
@@ -368,8 +365,8 @@ fastify.get("/names/address/:address/expired", async (request, reply) => {
         owner,
         registered_at,
         renewal_height,
-        stx_burn,
-       FROM names 
+        stx_burn
+       FROM ${schema}.names 
        WHERE owner = $1 
        AND revoked = false
        AND renewal_height != 0 
@@ -380,29 +377,25 @@ fastify.get("/names/address/:address/expired", async (request, reply) => {
     );
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       total: parseInt(countResult.rows[0].count),
       current_burn_block: currentBurnBlock,
       limit: parseInt(limit),
       offset: parseInt(offset),
       names: result.rows,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 7. Get names about to expire for an address (within 4320 blocks)
-fastify.get("/names/address/:address/expiring-soon", async (request, reply) => {
-  const { address } = request.params;
-  const { limit = 50, offset = 0 } = request.query;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 7. Get names about to expire for an address
+  getExpiringNamesByAddress: async (request, reply, { schema, network }) => {
+    const { address } = request.params;
+    const { limit = 50, offset = 0 } = request.query;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
     const expirationWindow = 4320;
     const expirationThreshold = currentBurnBlock + expirationWindow;
 
     const countResult = await pool.query(
-      `SELECT COUNT(*) FROM names 
+      `SELECT COUNT(*) FROM ${schema}.names 
        WHERE owner = $1 
        AND revoked = false
        AND renewal_height != 0 
@@ -421,7 +414,7 @@ fastify.get("/names/address/:address/expiring-soon", async (request, reply) => {
         renewal_height,
         stx_burn,
         renewal_height - $4 as blocks_until_expiry
-       FROM names 
+       FROM ${schema}.names 
        WHERE owner = $1 
        AND revoked = false
        AND renewal_height != 0 
@@ -433,27 +426,23 @@ fastify.get("/names/address/:address/expiring-soon", async (request, reply) => {
     );
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       total: parseInt(countResult.rows[0].count),
       current_burn_block: currentBurnBlock,
       limit: parseInt(limit),
       offset: parseInt(offset),
       names: result.rows,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 8. Get revoked names for an address
-fastify.get("/names/address/:address/revoked", async (request, reply) => {
-  const { address } = request.params;
-  const { limit = 50, offset = 0 } = request.query;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 8. Get revoked names for an address
+  getRevokedNamesByAddress: async (request, reply, { schema, network }) => {
+    const { address } = request.params;
+    const { limit = 50, offset = 0 } = request.query;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const countResult = await pool.query(
-      `SELECT COUNT(*) FROM names 
+      `SELECT COUNT(*) FROM ${schema}.names 
        WHERE owner = $1 
        AND revoked = true`,
       [address]
@@ -467,8 +456,8 @@ fastify.get("/names/address/:address/revoked", async (request, reply) => {
         owner,
         registered_at,
         renewal_height,
-        stx_burn,
-       FROM names 
+        stx_burn
+       FROM ${schema}.names 
        WHERE owner = $1 
        AND revoked = true
        ORDER BY name_string || '.' || namespace_string ASC
@@ -477,23 +466,19 @@ fastify.get("/names/address/:address/revoked", async (request, reply) => {
     );
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       total: parseInt(countResult.rows[0].count),
       current_burn_block: currentBurnBlock,
       limit: parseInt(limit),
       offset: parseInt(offset),
       names: result.rows,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 9. Get name details (modified to include decoded zonefile for valid names)
-fastify.get("/names/:full_name", async (request, reply) => {
-  const [name_string, namespace_string] = request.params.full_name.split(".");
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 9. Get name details
+  getNameDetails: async (request, reply, { schema, network }) => {
+    const [name_string, namespace_string] = request.params.full_name.split(".");
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const result = await pool.query(
       `SELECT 
@@ -512,7 +497,7 @@ fastify.get("/names/:full_name", async (request, reply) => {
           WHEN renewal_height > $3 THEN true
           ELSE false
         END as is_valid
-       FROM names 
+       FROM ${schema}.names 
        WHERE name_string = $1 AND namespace_string = $2`,
       [name_string, namespace_string, currentBurnBlock]
     );
@@ -522,7 +507,6 @@ fastify.get("/names/:full_name", async (request, reply) => {
     }
 
     const nameData = result.rows[0];
-
     let status = "active";
     if (nameData.revoked) {
       status = "revoked";
@@ -531,22 +515,20 @@ fastify.get("/names/:full_name", async (request, reply) => {
     }
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       current_burn_block: currentBurnBlock,
       status: status,
       data: nameData,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 10. Get all namespaces
-fastify.get("/namespaces", async (request, reply) => {
-  const { limit = 50, offset = 0 } = request.query;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
-    const countResult = await pool.query("SELECT COUNT(*) FROM namespaces");
+  // 10. Get all namespaces
+  getAllNamespaces: async (request, reply, { schema, network }) => {
+    const { limit = 50, offset = 0 } = request.query;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM ${schema}.namespaces`
+    );
 
     const result = await pool.query(
       `SELECT 
@@ -561,41 +543,37 @@ fastify.get("/namespaces", async (request, reply) => {
         price_function_nonalpha_discount,
         manager_transferable,
         can_update_price_function,
-        (SELECT COUNT(*) FROM names WHERE names.namespace_string = namespaces.namespace_string) as total_names,
+        (SELECT COUNT(*) FROM ${schema}.names WHERE names.namespace_string = namespaces.namespace_string) as total_names,
         (SELECT COUNT(*) 
-         FROM names 
+         FROM ${schema}.names 
          WHERE names.namespace_string = namespaces.namespace_string 
          AND (renewal_height = 0 OR renewal_height > $3)
          AND revoked = false) as active_names
-       FROM namespaces 
+       FROM ${schema}.namespaces 
        ORDER BY namespace_string ASC
        LIMIT $1 OFFSET $2`,
       [limit, offset, currentBurnBlock]
     );
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       total: parseInt(countResult.rows[0].count),
       current_burn_block: currentBurnBlock,
       limit: parseInt(limit),
       offset: parseInt(offset),
       namespaces: result.rows,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 11. Get all names in a namespace
-fastify.get("/names/namespace/:namespace", async (request, reply) => {
-  const { namespace } = request.params;
-  const { limit = 50, offset = 0 } = request.query;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 11. Get all names in a namespace
+  getNamesByNamespace: async (request, reply, { schema, network }) => {
+    const { namespace } = request.params;
+    const { limit = 50, offset = 0 } = request.query;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     // First check if namespace exists
     const namespaceExists = await pool.query(
-      "SELECT namespace_string FROM namespaces WHERE namespace_string = $1",
+      `SELECT namespace_string FROM ${schema}.namespaces WHERE namespace_string = $1`,
       [namespace]
     );
 
@@ -604,7 +582,7 @@ fastify.get("/names/namespace/:namespace", async (request, reply) => {
     }
 
     const countResult = await pool.query(
-      "SELECT COUNT(*) FROM names WHERE namespace_string = $1",
+      `SELECT COUNT(*) FROM ${schema}.names WHERE namespace_string = $1`,
       [namespace]
     );
 
@@ -616,36 +594,32 @@ fastify.get("/names/namespace/:namespace", async (request, reply) => {
         owner,
         registered_at,
         renewal_height,
-        stx_burn,
-       FROM names 
+        stx_burn
+       FROM ${schema}.names 
        WHERE namespace_string = $1
        ORDER BY name_string ASC
        LIMIT $2 OFFSET $3`,
-      [namespace, limit, offset, currentBurnBlock]
+      [namespace, limit, offset]
     );
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       total: parseInt(countResult.rows[0].count),
       current_burn_block: currentBurnBlock,
       limit: parseInt(limit),
       offset: parseInt(offset),
       names: result.rows,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 12. Resolve name
-fastify.get("/resolve-name/:full_name", async (request, reply) => {
-  const [name_string, namespace_string] = request.params.full_name.split(".");
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 12. Resolve name
+  resolveName: async (request, reply, { schema, network }) => {
+    const [name_string, namespace_string] = request.params.full_name.split(".");
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const result = await pool.query(
       `SELECT zonefile, owner
-       FROM names 
+       FROM ${schema}.names 
        WHERE name_string = $1 
        AND namespace_string = $2
        AND owner IS NOT NULL
@@ -667,30 +641,24 @@ fastify.get("/resolve-name/:full_name", async (request, reply) => {
       return reply.code(404).send({ error: "No zonefile found" });
     }
 
-    // Validate zonefile structure
     if (!isValidZonefileFormat(decodedZonefile)) {
       return reply.code(400).send({ error: "Invalid zonefile format" });
     }
 
-    // Check if owners match
     if (decodedZonefile.owner !== owner) {
       return reply.code(400).send({ error: "Zonefile needs to be updated" });
     }
 
     return reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       zonefile: decodedZonefile,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    return reply.code(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 13. Get a Namespace
-fastify.get("/namespaces/:namespace", async (request, reply) => {
-  const { namespace } = request.params;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 13. Get a Namespace
+  getNamespace: async (request, reply, { schema, network }) => {
+    const { namespace } = request.params;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const result = await pool.query(
       `SELECT 
@@ -705,29 +673,29 @@ fastify.get("/namespaces/:namespace", async (request, reply) => {
         price_function_nonalpha_discount,
         manager_transferable,
         can_update_price_function,
-        (SELECT COUNT(*) FROM names WHERE names.namespace_string = namespaces.namespace_string) as total_names,
+        (SELECT COUNT(*) FROM ${schema}.names WHERE names.namespace_string = namespaces.namespace_string) as total_names,
         (SELECT COUNT(*) 
-         FROM names 
+         FROM ${schema}.names 
          WHERE names.namespace_string = namespaces.namespace_string 
          AND (renewal_height = 0 OR renewal_height > $2)
          AND revoked = false) as active_names,
         (SELECT COUNT(*) 
-         FROM names 
+         FROM ${schema}.names 
          WHERE names.namespace_string = namespaces.namespace_string 
          AND renewal_height != 0 
          AND renewal_height <= $2
          AND revoked = false) as expired_names,
         (SELECT COUNT(*) 
-         FROM names 
+         FROM ${schema}.names 
          WHERE names.namespace_string = namespaces.namespace_string 
          AND revoked = true) as revoked_names,
         (SELECT MIN(registered_at) 
-         FROM names 
+         FROM ${schema}.names 
          WHERE names.namespace_string = namespaces.namespace_string) as first_registration,
         (SELECT MAX(registered_at) 
-         FROM names 
+         FROM ${schema}.names 
          WHERE names.namespace_string = namespaces.namespace_string) as last_registration
-       FROM namespaces 
+       FROM ${schema}.namespaces 
        WHERE namespace_string = $1`,
       [namespace, currentBurnBlock]
     );
@@ -737,28 +705,23 @@ fastify.get("/namespaces/:namespace", async (request, reply) => {
     }
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       current_burn_block: currentBurnBlock,
       namespace: result.rows[0],
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 14. Can name be registered
-fastify.get("/names/:namespace/:name/can-register", async (request, reply) => {
-  const { namespace, name } = request.params;
-
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 14. Can name be registered
+  canNameBeRegistered: async (request, reply, { schema, network }) => {
+    const { namespace, name } = request.params;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     // First check if namespace exists and is launched
     const namespaceResult = await pool.query(
       `SELECT 
         launched_at,
         namespace_manager
-       FROM namespaces 
+       FROM ${schema}.namespaces 
        WHERE namespace_string = $1`,
       [namespace]
     );
@@ -790,14 +753,14 @@ fastify.get("/names/:namespace/:name/can-register", async (request, reply) => {
         revoked,
         imported_at,
         owner
-       FROM names 
+       FROM ${schema}.names 
        WHERE name_string = $1 AND namespace_string = $2`,
       [name, namespace]
     );
 
-    // If name doesn't exist at all, it can be registered
     if (nameResult.rows.length === 0) {
       return reply.send({
+        ...(network === "testnet" && { network: "testnet" }),
         can_register: true,
         reason: "NAME_AVAILABLE",
       });
@@ -805,20 +768,20 @@ fastify.get("/names/:namespace/:name/can-register", async (request, reply) => {
 
     const nameData = nameResult.rows[0];
 
-    // Check if name is imported
     if (nameData.imported_at) {
       return reply.send({
+        ...(network === "testnet" && { network: "testnet" }),
         can_register: false,
         reason: "NAME_IMPORTED",
         current_owner: nameData.owner,
       });
     }
 
-    // Check if name is expired (for non-managed namespaces)
     if (!namespaceData.namespace_manager && nameData.renewal_height > 0) {
       const isExpired = nameData.renewal_height <= currentBurnBlock;
       if (isExpired) {
         return reply.send({
+          ...(network === "testnet" && { network: "testnet" }),
           can_register: true,
           reason: "NAME_EXPIRED",
           previous_owner: nameData.owner,
@@ -827,44 +790,35 @@ fastify.get("/names/:namespace/:name/can-register", async (request, reply) => {
       }
     }
 
-    // If we get here, name exists and is not available
     return reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       can_register: false,
       reason: "NAME_TAKEN",
       current_owner: nameData.owner,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 15. Get the last token id
-fastify.get("/token/last-id", async (request, reply) => {
-  try {
+  // 15. Get the last token id
+  getLastTokenId: async (request, reply, { schema, network }) => {
     const result = await pool.query(
-      "SELECT COALESCE(MAX(id), 0) as last_token_id FROM names"
+      `SELECT COALESCE(MAX(id), 0) as last_token_id FROM ${schema}.names`
     );
     const lastTokenId = result.rows[0].last_token_id;
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       last_token_id: lastTokenId,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 16. Get name renewal height
-fastify.get("/names/:full_name/renewal", async (request, reply) => {
-  const [name_string, namespace_string] = request.params.full_name.split(".");
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 16. Get name renewal height
+  getNameRenewal: async (request, reply, { schema, network }) => {
+    const [name_string, namespace_string] = request.params.full_name.split(".");
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     // First get the namespace info to check if it requires renewals
     const namespaceResult = await pool.query(
-      `SELECT lifetime::integer, namespace_manager::text FROM namespaces WHERE namespace_string = $1`,
+      `SELECT lifetime::integer, namespace_manager::text FROM ${schema}.namespaces WHERE namespace_string = $1`,
       [namespace_string]
     );
 
@@ -872,13 +826,11 @@ fastify.get("/names/:full_name/renewal", async (request, reply) => {
       return reply.status(404).send({ error: "Namespace not found" });
     }
 
-    // Parse lifetime as integer and check namespace_manager
     const lifetime = parseInt(namespaceResult.rows[0].lifetime) || 0;
     const namespace_manager = namespaceResult.rows[0].namespace_manager;
     const isManaged =
       namespace_manager !== "none" && namespace_manager !== null;
 
-    // Get the name details
     const nameResult = await pool.query(
       `SELECT 
         name_string,
@@ -887,7 +839,7 @@ fastify.get("/names/:full_name/renewal", async (request, reply) => {
         renewal_height::integer,
         revoked,
         imported_at
-       FROM names 
+       FROM ${schema}.names 
        WHERE name_string = $1 AND namespace_string = $2`,
       [name_string, namespace_string]
     );
@@ -898,9 +850,9 @@ fastify.get("/names/:full_name/renewal", async (request, reply) => {
 
     const nameData = nameResult.rows[0];
 
-    // If the name is revoked, return appropriate status
     if (nameData.revoked) {
       return reply.send({
+        ...(network === "testnet" && { network: "testnet" }),
         current_burn_block: currentBurnBlock,
         renewal_height: 0,
         blocks_until_expiry: 0,
@@ -910,9 +862,9 @@ fastify.get("/names/:full_name/renewal", async (request, reply) => {
       });
     }
 
-    // Case 1: Managed namespace
     if (isManaged) {
       return reply.send({
+        ...(network === "testnet" && { network: "testnet" }),
         current_burn_block: currentBurnBlock,
         renewal_height: 0,
         blocks_until_expiry: 0,
@@ -922,9 +874,9 @@ fastify.get("/names/:full_name/renewal", async (request, reply) => {
       });
     }
 
-    // Case 2: Unmanaged namespace with lifetime 0
     if (lifetime === 0) {
       return reply.send({
+        ...(network === "testnet" && { network: "testnet" }),
         current_burn_block: currentBurnBlock,
         renewal_height: 0,
         blocks_until_expiry: 0,
@@ -934,7 +886,6 @@ fastify.get("/names/:full_name/renewal", async (request, reply) => {
       });
     }
 
-    // Case 3: Unmanaged namespace with lifetime != 0
     const renewalHeight = parseInt(nameData.renewal_height) || 0;
     let status = "active";
     let needsRenewal = false;
@@ -958,6 +909,7 @@ fastify.get("/names/:full_name/renewal", async (request, reply) => {
     }
 
     return reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       current_burn_block: currentBurnBlock,
       renewal_height: renewalHeight,
       blocks_until_expiry: blocksUntilExpiry,
@@ -965,25 +917,19 @@ fastify.get("/names/:full_name/renewal", async (request, reply) => {
       needs_renewal: needsRenewal,
       is_managed: false,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 17. Check if a name can be resolved
-fastify.get("/names/:full_name/can-resolve", async (request, reply) => {
-  const [name_string, namespace_string] = request.params.full_name.split(".");
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 17. Check if a name can be resolved
+  canResolve: async (request, reply, { schema, network }) => {
+    const [name_string, namespace_string] = request.params.full_name.split(".");
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
-    // First check if namespace exists and get its properties
     const namespaceResult = await pool.query(
       `SELECT 
         lifetime::integer, 
         namespace_manager::text,
         launched_at
-       FROM namespaces 
+       FROM ${schema}.namespaces 
        WHERE namespace_string = $1`,
       [namespace_string]
     );
@@ -994,7 +940,6 @@ fastify.get("/names/:full_name/can-resolve", async (request, reply) => {
 
     const { lifetime, launched_at } = namespaceResult.rows[0];
 
-    // Check if namespace is launched
     if (!launched_at) {
       return reply.status(400).send({
         can_resolve: false,
@@ -1002,7 +947,6 @@ fastify.get("/names/:full_name/can-resolve", async (request, reply) => {
       });
     }
 
-    // Get name details
     const nameResult = await pool.query(
       `SELECT 
         name_string,
@@ -1012,7 +956,7 @@ fastify.get("/names/:full_name/can-resolve", async (request, reply) => {
         renewal_height::integer,
         revoked,
         imported_at
-       FROM names 
+       FROM ${schema}.names 
        WHERE name_string = $1 AND namespace_string = $2`,
       [name_string, namespace_string]
     );
@@ -1023,9 +967,9 @@ fastify.get("/names/:full_name/can-resolve", async (request, reply) => {
 
     const nameData = nameResult.rows[0];
 
-    // If name is revoked, it can't be resolved
     if (nameData.revoked) {
       return reply.send({
+        ...(network === "testnet" && { network: "testnet" }),
         can_resolve: false,
         error: "Name is revoked",
         current_burn_block: currentBurnBlock,
@@ -1034,9 +978,9 @@ fastify.get("/names/:full_name/can-resolve", async (request, reply) => {
 
     let renewalHeight = nameData.renewal_height;
 
-    // If lifetime is 0 (managed namespace or no renewals required)
     if (lifetime === 0) {
       return reply.send({
+        ...(network === "testnet" && { network: "testnet" }),
         can_resolve: true,
         renewal_height: 0,
         owner: nameData.owner,
@@ -1044,34 +988,28 @@ fastify.get("/names/:full_name/can-resolve", async (request, reply) => {
       });
     }
 
-    // For names that require renewals
-    // If renewal_height is 0 and name was imported, calculate based on namespace launch
     if (renewalHeight === 0 && nameData.imported_at) {
       renewalHeight = launched_at + lifetime;
     }
 
-    // Check if name is within valid period (including grace period)
     const isWithinValidPeriod =
-      renewalHeight === 0 || currentBurnBlock <= renewalHeight + 5000; // 5000 blocks grace period
+      renewalHeight === 0 || currentBurnBlock <= renewalHeight + 5000;
 
     return reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       can_resolve: isWithinValidPeriod,
       renewal_height: renewalHeight,
       owner: nameData.owner,
       current_burn_block: currentBurnBlock,
       ...(isWithinValidPeriod ? {} : { error: "Name expired" }),
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 18. Get owner of a name
-fastify.get("/names/:full_name/owner", async (request, reply) => {
-  const [name_string, namespace_string] = request.params.full_name.split(".");
-  try {
-    // Get name details
+  // 18. Get owner of a name
+  getNameOwner: async (request, reply, { schema, network }) => {
+    const [name_string, namespace_string] = request.params.full_name.split(".");
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
+
     const nameResult = await pool.query(
       `SELECT 
         owner,
@@ -1079,7 +1017,7 @@ fastify.get("/names/:full_name/owner", async (request, reply) => {
         renewal_height::integer,
         registered_at,
         imported_at
-       FROM names 
+       FROM ${schema}.names 
        WHERE name_string = $1 AND namespace_string = $2`,
       [name_string, namespace_string]
     );
@@ -1089,15 +1027,13 @@ fastify.get("/names/:full_name/owner", async (request, reply) => {
     }
 
     const nameData = nameResult.rows[0];
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
 
-    // Get namespace details to check lifetime
     const namespaceResult = await pool.query(
       `SELECT 
         lifetime::integer,
         namespace_manager::text,
         launched_at
-       FROM namespaces 
+       FROM ${schema}.namespaces 
        WHERE namespace_string = $1`,
       [namespace_string]
     );
@@ -1108,16 +1044,13 @@ fastify.get("/names/:full_name/owner", async (request, reply) => {
 
     const { lifetime, launched_at } = namespaceResult.rows[0];
 
-    // Check if namespace is launched
     if (!launched_at) {
-      return reply.status(400).send({
-        error: "Namespace not launched",
-      });
+      return reply.status(400).send({ error: "Namespace not launched" });
     }
 
-    // If name is revoked
     if (nameData.revoked) {
       return reply.send({
+        ...(network === "testnet" && { network: "testnet" }),
         owner: nameData.owner,
         current_burn_block: currentBurnBlock,
         status: "revoked",
@@ -1125,26 +1058,22 @@ fastify.get("/names/:full_name/owner", async (request, reply) => {
     }
 
     let renewalHeight = nameData.renewal_height;
-
-    // If renewal_height is 0 and name was imported, calculate based on namespace launch
     if (renewalHeight === 0 && nameData.imported_at && lifetime !== 0) {
       renewalHeight = launched_at + lifetime;
     }
 
-    // For names that don't expire (lifetime = 0 or managed namespaces)
     if (lifetime === 0) {
       return reply.send({
+        ...(network === "testnet" && { network: "testnet" }),
         owner: nameData.owner,
         current_burn_block: currentBurnBlock,
         status: "active",
       });
     }
 
-    // Check if name is within valid period (including grace period)
     const isWithinValidPeriod =
-      renewalHeight === 0 || currentBurnBlock <= renewalHeight + 5000; // 5000 blocks grace period
+      renewalHeight === 0 || currentBurnBlock <= renewalHeight + 5000;
 
-    // Determine status
     let status = "active";
     if (!isWithinValidPeriod) {
       status = "expired";
@@ -1155,22 +1084,19 @@ fastify.get("/names/:full_name/owner", async (request, reply) => {
     }
 
     return reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       owner: nameData.owner,
       current_burn_block: currentBurnBlock,
       renewal_height: renewalHeight,
       status: status,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 19. Get owner of a name by token ID
-fastify.get("/tokens/:id/owner", async (request, reply) => {
-  const id = request.params.id;
-  try {
-    // First get the name and namespace for this token ID
+  // 19. Get owner of a name by token ID
+  getTokenOwner: async (request, reply, { schema, network }) => {
+    const { id } = request.params;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
+
     const tokenResult = await pool.query(
       `SELECT 
         n.name_string,
@@ -1180,7 +1106,7 @@ fastify.get("/tokens/:id/owner", async (request, reply) => {
         n.renewal_height::integer,
         n.registered_at,
         n.imported_at
-       FROM names n
+       FROM ${schema}.names n
        WHERE n.id = $1`,
       [id]
     );
@@ -1190,15 +1116,13 @@ fastify.get("/tokens/:id/owner", async (request, reply) => {
     }
 
     const nameData = tokenResult.rows[0];
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
 
-    // Get namespace details to check lifetime
     const namespaceResult = await pool.query(
       `SELECT 
         lifetime::integer,
         namespace_manager::text,
         launched_at
-       FROM namespaces 
+       FROM ${schema}.namespaces 
        WHERE namespace_string = $1`,
       [nameData.namespace_string]
     );
@@ -1209,16 +1133,13 @@ fastify.get("/tokens/:id/owner", async (request, reply) => {
 
     const { lifetime, launched_at } = namespaceResult.rows[0];
 
-    // Check if namespace is launched
     if (!launched_at) {
-      return reply.status(400).send({
-        error: "Namespace not launched",
-      });
+      return reply.status(400).send({ error: "Namespace not launched" });
     }
 
-    // If name is revoked
     if (nameData.revoked) {
       return reply.send({
+        ...(network === "testnet" && { network: "testnet" }),
         owner: nameData.owner,
         name: nameData.name_string,
         namespace: nameData.namespace_string,
@@ -1228,15 +1149,13 @@ fastify.get("/tokens/:id/owner", async (request, reply) => {
     }
 
     let renewalHeight = nameData.renewal_height;
-
-    // If renewal_height is 0 and name was imported, calculate based on namespace launch
     if (renewalHeight === 0 && nameData.imported_at && lifetime !== 0) {
       renewalHeight = launched_at + lifetime;
     }
 
-    // For names that don't expire (lifetime = 0 or managed namespaces)
     if (lifetime === 0) {
       return reply.send({
+        ...(network === "testnet" && { network: "testnet" }),
         owner: nameData.owner,
         name: nameData.name_string,
         namespace: nameData.namespace_string,
@@ -1245,11 +1164,9 @@ fastify.get("/tokens/:id/owner", async (request, reply) => {
       });
     }
 
-    // Check if name is within valid period (including grace period)
     const isWithinValidPeriod =
-      renewalHeight === 0 || currentBurnBlock <= renewalHeight + 5000; // 5000 blocks grace period
+      renewalHeight === 0 || currentBurnBlock <= renewalHeight + 5000;
 
-    // Determine status
     let status = "active";
     if (!isWithinValidPeriod) {
       status = "expired";
@@ -1260,6 +1177,7 @@ fastify.get("/tokens/:id/owner", async (request, reply) => {
     }
 
     return reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       owner: nameData.owner,
       name: nameData.name_string,
       namespace: nameData.namespace_string,
@@ -1267,20 +1185,15 @@ fastify.get("/tokens/:id/owner", async (request, reply) => {
       renewal_height: renewalHeight,
       status: status,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 20. Get token ID from name
-fastify.get("/names/:full_name/id", async (request, reply) => {
-  const [name_string, namespace_string] = request.params.full_name.split(".");
-  try {
-    // Get the token ID for this name
+  // 20. Get token ID from name
+  getNameId: async (request, reply, { schema, network }) => {
+    const [name_string, namespace_string] = request.params.full_name.split(".");
+
     const result = await pool.query(
       `SELECT id 
-       FROM names 
+       FROM ${schema}.names 
        WHERE name_string = $1 AND namespace_string = $2`,
       [name_string, namespace_string]
     );
@@ -1290,26 +1203,22 @@ fastify.get("/names/:full_name/id", async (request, reply) => {
     }
 
     return reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       name: name_string,
       namespace: namespace_string,
       id: result.rows[0].id,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 21. Get name from token ID
-fastify.get("/tokens/:id/name", async (request, reply) => {
-  const id = request.params.id;
-  try {
-    // Get the name and namespace for this token ID
+  // 21. Get name from token ID
+  getTokenName: async (request, reply, { schema, network }) => {
+    const { id } = request.params;
+
     const result = await pool.query(
       `SELECT 
         name_string,
         namespace_string
-       FROM names 
+       FROM ${schema}.names 
        WHERE id = $1`,
       [id]
     );
@@ -1321,22 +1230,18 @@ fastify.get("/tokens/:id/name", async (request, reply) => {
     const { name_string, namespace_string } = result.rows[0];
 
     return reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       id: parseInt(id),
       name: name_string,
       namespace: namespace_string,
       full_name: `${name_string}.${namespace_string}`,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 22. Get name information by token ID
-fastify.get("/tokens/:id/info", async (request, reply) => {
-  const id = request.params.id;
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 22. Get name information by token ID
+  getTokenInfo: async (request, reply, { schema, network }) => {
+    const { id } = request.params;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const result = await pool.query(
       `SELECT 
@@ -1355,7 +1260,7 @@ fastify.get("/tokens/:id/info", async (request, reply) => {
           WHEN renewal_height > $2 THEN true
           ELSE false
         END as is_valid
-       FROM names 
+       FROM ${schema}.names 
        WHERE id = $1`,
       [id, currentBurnBlock]
     );
@@ -1365,9 +1270,8 @@ fastify.get("/tokens/:id/info", async (request, reply) => {
     }
 
     const nameData = result.rows[0];
-
-    // Set appropriate status message
     let status = "active";
+
     if (nameData.revoked) {
       status = "revoked";
     } else if (!nameData.is_valid) {
@@ -1375,25 +1279,21 @@ fastify.get("/tokens/:id/info", async (request, reply) => {
     }
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       current_burn_block: currentBurnBlock,
       status: status,
       data: nameData,
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 23. Get rarity metrics for a name
-fastify.get("/names/:full_name/rarity", async (request, reply) => {
-  const [name_string, namespace_string] = request.params.full_name.split(".");
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 23. Get rarity metrics for a name
+  getNameRarity: async (request, reply, { schema, network }) => {
+    const [name_string, namespace_string] = request.params.full_name.split(".");
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     // First verify the name exists
     const nameExists = await pool.query(
-      `SELECT id FROM names WHERE name_string = $1 AND namespace_string = $2`,
+      `SELECT id FROM ${schema}.names WHERE name_string = $1 AND namespace_string = $2`,
       [name_string, namespace_string]
     );
 
@@ -1403,7 +1303,7 @@ fastify.get("/names/:full_name/rarity", async (request, reply) => {
 
     // Get total names in namespace for percentile calculations
     const totalNames = await pool.query(
-      `SELECT COUNT(*) as total FROM names WHERE namespace_string = $1`,
+      `SELECT COUNT(*) as total FROM ${schema}.names WHERE namespace_string = $1`,
       [namespace_string]
     );
 
@@ -1413,18 +1313,18 @@ fastify.get("/names/:full_name/rarity", async (request, reply) => {
       WITH stats AS (
         SELECT 
           -- Length stats
-          (SELECT COUNT(*) FROM names WHERE namespace_string = $2 AND LENGTH(name_string) = LENGTH($1)) as same_length_count,
+          (SELECT COUNT(*) FROM ${schema}.names WHERE namespace_string = $2 AND LENGTH(name_string) = LENGTH($1)) as same_length_count,
           
           -- Numeric-only names
-          (SELECT COUNT(*) FROM names WHERE namespace_string = $2 
+          (SELECT COUNT(*) FROM ${schema}.names WHERE namespace_string = $2 
            AND name_string ~ '^[0-9]+$') as numeric_only_count,
           
           -- Letter-only names
-          (SELECT COUNT(*) FROM names WHERE namespace_string = $2 
+          (SELECT COUNT(*) FROM ${schema}.names WHERE namespace_string = $2 
            AND name_string ~ '^[a-z]+$') as letter_only_count,
           
           -- Names with special characters
-          (SELECT COUNT(*) FROM names WHERE namespace_string = $2 
+          (SELECT COUNT(*) FROM ${schema}.names WHERE namespace_string = $2 
            AND name_string ~ '[^a-z0-9]') as special_char_count,
           
           -- Pattern matches for current name
@@ -1451,19 +1351,14 @@ fastify.get("/names/:full_name/rarity", async (request, reply) => {
     );
 
     const metrics = metricsResult.rows[0];
-
-    // Get palindrome status
     const isPalindrome =
       name_string === name_string.split("").reverse().join("");
-
-    // Get repeating character patterns
     const hasRepeatingChars = /(.)\1+/.test(name_string);
 
     // Calculate rarity score (0-100, where lower is rarer)
     let rarityScore = 0;
 
-    // Length contribution (shorter names are rarer)
-    // Names length 1-3 are extremely rare
+    // Length contribution
     if (metrics.name_length <= 3) {
       rarityScore += 10;
     } else if (metrics.name_length <= 5) {
@@ -1478,23 +1373,24 @@ fastify.get("/names/:full_name/rarity", async (request, reply) => {
 
     // Type contribution
     if (metrics.is_numeric) {
-      rarityScore += parseFloat(metrics.numeric_percentile) * 0.2; // Weight numeric contribution
+      rarityScore += parseFloat(metrics.numeric_percentile) * 0.2;
     }
     if (metrics.is_letters_only) {
-      rarityScore += parseFloat(metrics.letters_percentile) * 0.2; // Weight letters contribution
+      rarityScore += parseFloat(metrics.letters_percentile) * 0.2;
     }
     if (metrics.has_special_chars) {
-      rarityScore += parseFloat(metrics.special_char_percentile) * 0.2; // Weight special chars contribution
+      rarityScore += parseFloat(metrics.special_char_percentile) * 0.2;
     }
 
     // Special patterns contribution
-    if (isPalindrome) rarityScore -= 10; // Palindromes are rarer
-    if (hasRepeatingChars) rarityScore += 5; // Repeating chars are more common
+    if (isPalindrome) rarityScore -= 10;
+    if (hasRepeatingChars) rarityScore += 5;
 
-    // Normalize score to 0-100 range
+    // Normalize score
     rarityScore = Math.max(0, Math.min(100, rarityScore));
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       name: name_string,
       namespace: namespace_string,
       metrics: {
@@ -1533,19 +1429,13 @@ fastify.get("/names/:full_name/rarity", async (request, reply) => {
         },
       },
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
 
-// 24. Get rarest names in a namespace
-fastify.get("/namespaces/:namespace/rare-names", async (request, reply) => {
-  const { namespace } = request.params;
-  const { limit = 50, offset = 0 } = request.query;
-
-  try {
-    const currentBurnBlock = await getCurrentBurnBlockHeight();
+  // 24. Get rarest names in a namespace
+  getRarestNames: async (request, reply, { schema, network }) => {
+    const { namespace } = request.params;
+    const { limit = 50, offset = 0 } = request.query;
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const result = await pool.query(
       `
@@ -1562,7 +1452,7 @@ fastify.get("/namespaces/:namespace/rare-names", async (request, reply) => {
             ELSE false 
           END as has_pattern,
           name_string = REVERSE(name_string) as is_palindrome
-        FROM names 
+        FROM ${schema}.names 
         WHERE namespace_string = $1
         AND revoked = false
         AND (renewal_height = 0 OR renewal_height > $4)
@@ -1593,11 +1483,12 @@ fastify.get("/namespaces/:namespace/rare-names", async (request, reply) => {
     );
 
     const countResult = await pool.query(
-      `SELECT COUNT(*) FROM names WHERE namespace_string = $1`,
+      `SELECT COUNT(*) FROM ${schema}.names WHERE namespace_string = $1`,
       [namespace]
     );
 
     reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
       total: parseInt(countResult.rows[0].count),
       current_burn_block: currentBurnBlock,
       limit: parseInt(limit),
@@ -1616,14 +1507,182 @@ fastify.get("/namespaces/:namespace/rare-names", async (request, reply) => {
             : "Very Common",
       })),
     });
-  } catch (err) {
-    fastify.log.error(err);
-    reply.status(500).send({ error: "Internal Server Error" });
-  }
-});
+  },
+};
 
+// Route registration
+function registerRoutes() {
+  // Mainnet routes
+  fastify.get("/names", createNetworkHandler(handlers.getAllNames));
+  fastify.get("/names/valid", createNetworkHandler(handlers.getValidNames));
+  fastify.get("/names/expired", createNetworkHandler(handlers.getExpiredNames));
+  fastify.get("/names/revoked", createNetworkHandler(handlers.getRevokedNames));
+  fastify.get(
+    "/names/address/:address/valid",
+    createNetworkHandler(handlers.getValidNamesByAddress)
+  );
+  fastify.get(
+    "/names/address/:address/expired",
+    createNetworkHandler(handlers.getExpiredNamesByAddress)
+  );
+  fastify.get(
+    "/names/address/:address/expiring-soon",
+    createNetworkHandler(handlers.getExpiringNamesByAddress)
+  );
+  fastify.get(
+    "/names/address/:address/revoked",
+    createNetworkHandler(handlers.getRevokedNamesByAddress)
+  );
+  fastify.get(
+    "/names/:full_name",
+    createNetworkHandler(handlers.getNameDetails)
+  );
+  fastify.get("/namespaces", createNetworkHandler(handlers.getAllNamespaces));
+  fastify.get(
+    "/names/namespace/:namespace",
+    createNetworkHandler(handlers.getNamesByNamespace)
+  );
+  fastify.get(
+    "/resolve-name/:full_name",
+    createNetworkHandler(handlers.resolveName)
+  );
+  fastify.get(
+    "/namespaces/:namespace",
+    createNetworkHandler(handlers.getNamespace)
+  );
+  fastify.get(
+    "/names/:namespace/:name/can-register",
+    createNetworkHandler(handlers.canNameBeRegistered)
+  );
+  fastify.get("/token/last-id", createNetworkHandler(handlers.getLastTokenId));
+  fastify.get(
+    "/names/:full_name/renewal",
+    createNetworkHandler(handlers.getNameRenewal)
+  );
+  fastify.get(
+    "/names/:full_name/can-resolve",
+    createNetworkHandler(handlers.canResolve)
+  );
+  fastify.get(
+    "/names/:full_name/owner",
+    createNetworkHandler(handlers.getNameOwner)
+  );
+  fastify.get(
+    "/tokens/:id/owner",
+    createNetworkHandler(handlers.getTokenOwner)
+  );
+  fastify.get("/names/:full_name/id", createNetworkHandler(handlers.getNameId));
+  fastify.get("/tokens/:id/name", createNetworkHandler(handlers.getTokenName));
+  fastify.get("/tokens/:id/info", createNetworkHandler(handlers.getTokenInfo));
+  fastify.get(
+    "/names/:full_name/rarity",
+    createNetworkHandler(handlers.getNameRarity)
+  );
+  fastify.get(
+    "/namespaces/:namespace/rare-names",
+    createNetworkHandler(handlers.getRarestNames)
+  );
+
+  // Testnet routes (same endpoints with /testnet prefix)
+  fastify.get("/testnet/names", createNetworkHandler(handlers.getAllNames));
+  fastify.get(
+    "/testnet/names/valid",
+    createNetworkHandler(handlers.getValidNames)
+  );
+  fastify.get(
+    "/testnet/names/expired",
+    createNetworkHandler(handlers.getExpiredNames)
+  );
+  fastify.get(
+    "/testnet/names/revoked",
+    createNetworkHandler(handlers.getRevokedNames)
+  );
+  fastify.get(
+    "/testnet/names/address/:address/valid",
+    createNetworkHandler(handlers.getValidNamesByAddress)
+  );
+  fastify.get(
+    "/testnet/names/address/:address/expired",
+    createNetworkHandler(handlers.getExpiredNamesByAddress)
+  );
+  fastify.get(
+    "/testnet/names/address/:address/expiring-soon",
+    createNetworkHandler(handlers.getExpiringNamesByAddress)
+  );
+  fastify.get(
+    "/testnet/names/address/:address/revoked",
+    createNetworkHandler(handlers.getRevokedNamesByAddress)
+  );
+  fastify.get(
+    "/testnet/names/:full_name",
+    createNetworkHandler(handlers.getNameDetails)
+  );
+  fastify.get(
+    "/testnet/namespaces",
+    createNetworkHandler(handlers.getAllNamespaces)
+  );
+  fastify.get(
+    "/testnet/names/namespace/:namespace",
+    createNetworkHandler(handlers.getNamesByNamespace)
+  );
+  fastify.get(
+    "/testnet/resolve-name/:full_name",
+    createNetworkHandler(handlers.resolveName)
+  );
+  fastify.get(
+    "/testnet/namespaces/:namespace",
+    createNetworkHandler(handlers.getNamespace)
+  );
+  fastify.get(
+    "/testnet/names/:namespace/:name/can-register",
+    createNetworkHandler(handlers.canNameBeRegistered)
+  );
+  fastify.get(
+    "/testnet/token/last-id",
+    createNetworkHandler(handlers.getLastTokenId)
+  );
+  fastify.get(
+    "/testnet/names/:full_name/renewal",
+    createNetworkHandler(handlers.getNameRenewal)
+  );
+  fastify.get(
+    "/testnet/names/:full_name/can-resolve",
+    createNetworkHandler(handlers.canResolve)
+  );
+  fastify.get(
+    "/testnet/names/:full_name/owner",
+    createNetworkHandler(handlers.getNameOwner)
+  );
+  fastify.get(
+    "/testnet/tokens/:id/owner",
+    createNetworkHandler(handlers.getTokenOwner)
+  );
+  fastify.get(
+    "/testnet/names/:full_name/id",
+    createNetworkHandler(handlers.getNameId)
+  );
+  fastify.get(
+    "/testnet/tokens/:id/name",
+    createNetworkHandler(handlers.getTokenName)
+  );
+  fastify.get(
+    "/testnet/tokens/:id/info",
+    createNetworkHandler(handlers.getTokenInfo)
+  );
+  fastify.get(
+    "/testnet/names/:full_name/rarity",
+    createNetworkHandler(handlers.getNameRarity)
+  );
+  fastify.get(
+    "/testnet/namespaces/:namespace/rare-names",
+    createNetworkHandler
+  );
+}
+
+// Start the server
 const start = async () => {
   try {
+    registerRoutes();
     await fastify.listen({ port: 3000 });
     fastify.log.info(`Server is running at http://localhost:3000`);
   } catch (err) {
