@@ -93,9 +93,8 @@ function decodeZonefile(zonefileHex) {
 
 function isValidZonefileFormat(zonefile) {
   try {
-    console.log("Validating zonefile:", JSON.stringify(zonefile, null, 2));
-
-    const required_fields = [
+    // FIRST: Attempt old format validation
+    const oldRequiredFields = [
       "owner",
       "general",
       "twitter",
@@ -105,40 +104,112 @@ function isValidZonefileFormat(zonefile) {
       "btc",
       "subdomains",
     ];
+    const oldSubdomainFields = [
+      "name",
+      "sequence",
+      "owner",
+      "signature",
+      "text",
+    ];
 
-    for (const field of required_fields) {
-      if (!(field in zonefile)) {
-        return false;
-      }
-    }
-
-    if (!Array.isArray(zonefile.subdomains)) {
-      return false;
-    }
-
-    for (let i = 0; i < zonefile.subdomains.length; i++) {
-      const subdomain = zonefile.subdomains[i];
-      const required_subdomain_fields = [
-        "name",
-        "sequence",
-        "owner",
-        "signature",
-        "text",
-      ];
-
-      for (const field of required_subdomain_fields) {
-        if (!(field in subdomain)) {
+    function validateOldFormat(zf) {
+      for (const field of oldRequiredFields) {
+        if (!(field in zf)) {
           return false;
         }
       }
 
-      if (typeof subdomain.sequence !== "number") {
+      if (!Array.isArray(zf.subdomains)) {
         return false;
+      }
+
+      for (let i = 0; i < zf.subdomains.length; i++) {
+        const subdomain = zf.subdomains[i];
+
+        for (const field of oldSubdomainFields) {
+          if (!(field in subdomain)) {
+            return false;
+          }
+        }
+
+        if (typeof subdomain.sequence !== "number") {
+          return false;
+        }
+      }
+
+      return true;
+    }
+
+    // Check if old format is valid
+    if (validateOldFormat(zonefile)) {
+      return true;
+    }
+
+    // If not old format, attempt new format validation
+    const baseFields = [
+      "owner",
+      "general",
+      "twitter",
+      "url",
+      "nostr",
+      "lightning",
+      "btc",
+    ];
+
+    // Check that all base fields are strings
+    for (const field of baseFields) {
+      if (typeof zonefile[field] !== "string") {
+        return false;
+      }
+    }
+
+    const hasExternalFile =
+      "externalSubdomainFile" in zonefile &&
+      typeof zonefile.externalSubdomainFile === "string";
+    const hasSubdomains = "subdomains" in zonefile;
+
+    // They can't both be present
+    if (hasExternalFile && hasSubdomains) {
+      return false;
+    }
+
+    // If externalSubdomainFile is present and valid, that's enough for the new format
+    if (hasExternalFile) {
+      return true;
+    }
+
+    // If no external file, we must have subdomains
+    if (!hasSubdomains) {
+      return false;
+    }
+
+    // Check the structure of subdomains in the new format
+    const subdomains = zonefile.subdomains;
+    if (
+      typeof subdomains !== "object" ||
+      subdomains === null ||
+      Array.isArray(subdomains)
+    ) {
+      return false;
+    }
+
+    // Each subdomain in the new format must be an object with all base fields as strings
+    for (const subName in subdomains) {
+      const subProps = subdomains[subName];
+      if (typeof subProps !== "object" || subProps === null) {
+        return false;
+      }
+
+      for (const field of baseFields) {
+        if (typeof subProps[field] !== "string") {
+          return false;
+        }
       }
     }
 
     return true;
   } catch (error) {
+    console.error("Error validating zonefile:", error);
     return false;
   }
 }
