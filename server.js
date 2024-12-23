@@ -4,6 +4,7 @@ import rateLimit from "@fastify/rate-limit";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
 import cors from "@fastify/cors";
+import Ajv from "ajv";
 
 dotenv.config();
 
@@ -75,6 +76,202 @@ async function getCurrentBurnBlockHeight(network) {
   return data.results[0].burn_block_height;
 }
 
+const ajv = new Ajv({ allErrors: true });
+const subdomainsSchema = {
+  type: "object",
+  additionalProperties: false,
+  patternProperties: {
+    "^[a-z0-9-_]+$": {
+      type: "object",
+      required: [
+        "owner",
+        "general",
+        "twitter",
+        "url",
+        "nostr",
+        "lightning",
+        "btc",
+      ],
+      properties: {
+        owner: { type: "string" },
+        general: { type: "string" },
+        twitter: { type: "string" },
+        url: { type: "string" },
+        nostr: { type: "string" },
+        lightning: { type: "string" },
+        btc: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
+const validateSubdomains = ajv.compile(subdomainsSchema);
+
+function isValidHttpsUrl(urlString) {
+  try {
+    const url = new URL(urlString);
+    return url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function hasJsonExtension(urlString) {
+  const pathname = new URL(urlString).pathname.toLowerCase();
+  return pathname.endsWith(".json");
+}
+
+function hasNoQueryOrFragment(urlString) {
+  const url = new URL(urlString);
+  return !url.search && !url.hash;
+}
+
+function isSafeDomain(urlString) {
+  const url = new URL(urlString);
+  const forbiddenPatterns = [/^localhost$/, /^127\.0\.0\.1$/];
+  return !forbiddenPatterns.some((pattern) => pattern.test(url.hostname));
+}
+
+function noUserInfo(urlString) {
+  const url = new URL(urlString);
+  return !url.username && !url.password;
+}
+
+function isAllowedS3Domain(urlString) {
+  try {
+    const url = new URL(urlString);
+    const s3DomainPattern =
+      /^[a-z0-9.-]+\.s3([.-][a-z0-9-]+)*\.amazonaws\.com$/i;
+    return s3DomainPattern.test(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+const MAX_SIZE = 50 * 1024 * 1024; // 50 MB max
+const FETCH_TIMEOUT = 5000; // 5 seconds timeout
+
+async function fetchExternalSubdomains(urlString) {
+  if (!isValidHttpsUrl(urlString)) {
+    throw new Error("External URL must be HTTPS");
+  }
+  if (!hasJsonExtension(urlString)) {
+    throw new Error("External file must end with .json");
+  }
+  if (!isSafeDomain(urlString)) {
+    throw new Error("External URL domain is not safe");
+  }
+  if (!hasNoQueryOrFragment(urlString)) {
+    throw new Error("External URL must not have query or fragment");
+  }
+  if (!noUserInfo(urlString)) {
+    throw new Error("External URL must not contain user info");
+  }
+  if (!isAllowedS3Domain(urlString)) {
+    throw new Error("External URL must be an allowed S3 domain");
+  }
+
+  // 1) HEAD request to check content-type and (potentially) content-length
+  const headResponse = await fetch(urlString, { method: "HEAD" });
+  if (!headResponse.ok) {
+    throw new Error("Unable to verify external subdomains file");
+  }
+
+  const contentType = headResponse.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    throw new Error("External file is not application/json");
+  }
+
+  const reportedSize = headResponse.headers.get("content-length");
+  if (reportedSize && parseInt(reportedSize, 10) > MAX_SIZE) {
+    // If the server claims the file is bigger than we allow
+    throw new Error("External subdomain file too large");
+  }
+
+  // 2) GET request + streaming approach (so we *know* we don’t exceed MAX_SIZE)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+
+  let response;
+  try {
+    response = await fetch(urlString, { signal: controller.signal });
+  } catch (err) {
+    throw new Error(
+      "Failed to fetch external subdomains file (timeout or network error)"
+    );
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    throw new Error("Failed to fetch external subdomains file");
+  }
+
+  // response.body is a Node.js Readable stream.
+  const stream = response.body;
+
+  let totalSize = 0;
+  const chunks = [];
+
+  return new Promise((resolve, reject) => {
+    // Listen for data
+    stream.on("data", (chunk) => {
+      totalSize += chunk.length;
+
+      // If the file is actually larger than MAX_SIZE, destroy the stream
+      if (totalSize > MAX_SIZE) {
+        stream.destroy();
+        reject(new Error("External subdomain file too large"));
+        return;
+      }
+
+      chunks.push(chunk);
+    });
+
+    // If there's an error with the stream
+    stream.on("error", (err) => {
+      reject(
+        new Error("Error reading external subdomains file: " + err.message)
+      );
+    });
+
+    // End event fires when we have all data
+    stream.on("end", () => {
+      // Combine all chunks
+      const allBytes = Buffer.concat(chunks);
+
+      let data;
+      try {
+        const jsonString = allBytes.toString("utf8");
+        data = JSON.parse(jsonString);
+      } catch (error) {
+        reject(new Error("Invalid JSON format in external subdomains file"));
+        return;
+      }
+
+      // Validate that "subdomains" property exists
+      if (!("subdomains" in data)) {
+        reject(new Error("No 'subdomains' property found in the JSON"));
+        return;
+      }
+
+      // Validate subdomains with AJV
+      const valid = validateSubdomains(data.subdomains);
+      if (!valid) {
+        const errors = validateSubdomains.errors
+          .map((err) => `${err.instancePath} ${err.message}`)
+          .join(", ");
+        reject(new Error("Invalid subdomains schema: " + errors));
+        return;
+      }
+
+      // All good, resolve
+      resolve(data);
+    });
+  });
+}
+
 function decodeZonefile(zonefileHex) {
   if (!zonefileHex) return null;
   try {
@@ -93,7 +290,6 @@ function decodeZonefile(zonefileHex) {
 
 function isValidZonefileFormat(zonefile) {
   try {
-    // FIRST: Attempt old format validation
     const oldRequiredFields = [
       "owner",
       "general",
@@ -140,12 +336,10 @@ function isValidZonefileFormat(zonefile) {
       return true;
     }
 
-    // Check if old format is valid
     if (validateOldFormat(zonefile)) {
       return true;
     }
 
-    // If not old format, attempt new format validation
     const baseFields = [
       "owner",
       "general",
@@ -156,7 +350,6 @@ function isValidZonefileFormat(zonefile) {
       "btc",
     ];
 
-    // Check that all base fields are strings
     for (const field of baseFields) {
       if (typeof zonefile[field] !== "string") {
         return false;
@@ -168,22 +361,18 @@ function isValidZonefileFormat(zonefile) {
       typeof zonefile.externalSubdomainFile === "string";
     const hasSubdomains = "subdomains" in zonefile;
 
-    // They can't both be present
     if (hasExternalFile && hasSubdomains) {
       return false;
     }
 
-    // If externalSubdomainFile is present and valid, that's enough for the new format
     if (hasExternalFile) {
       return true;
     }
 
-    // If no external file, we must have subdomains
     if (!hasSubdomains) {
       return false;
     }
 
-    // Check the structure of subdomains in the new format
     const subdomains = zonefile.subdomains;
     if (
       typeof subdomains !== "object" ||
@@ -193,7 +382,6 @@ function isValidZonefileFormat(zonefile) {
       return false;
     }
 
-    // Each subdomain in the new format must be an object with all base fields as strings
     for (const subName in subdomains) {
       const subProps = subdomains[subName];
       if (typeof subProps !== "object" || subProps === null) {
@@ -1579,6 +1767,90 @@ const handlers = {
       })),
     });
   },
+
+  getSubdomains: async (request, reply, { schema, network }) => {
+    const [name_string, namespace_string] = request.params.full_name.split(".");
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
+
+    const result = await pool.query(
+      `SELECT zonefile, owner
+       FROM ${schema}.names 
+       WHERE name_string = $1 
+       AND namespace_string = $2
+       AND owner IS NOT NULL
+       AND revoked = false
+       AND (renewal_height = 0 OR renewal_height > $3)`,
+      [name_string, namespace_string, currentBurnBlock]
+    );
+
+    if (result.rows.length === 0) {
+      return reply
+        .code(404)
+        .send({ error: "Name not found, expired or revoked" });
+    }
+
+    const { zonefile, owner } = result.rows[0];
+    const decodedZonefile = decodeZonefile(zonefile);
+
+    if (!decodedZonefile) {
+      return reply.code(404).send({ error: "No zonefile found" });
+    }
+
+    if (!isValidZonefileFormat(decodedZonefile)) {
+      return reply.code(400).send({ error: "Invalid zonefile format" });
+    }
+
+    if (decodedZonefile.owner !== owner) {
+      return reply.code(400).send({ error: "Zonefile needs to be updated" });
+    }
+
+    if (
+      "externalSubdomainFile" in decodedZonefile &&
+      typeof decodedZonefile.externalSubdomainFile === "string"
+    ) {
+      const externalUrl = decodedZonefile.externalSubdomainFile;
+      try {
+        const externalData = await fetchExternalSubdomains(externalUrl);
+
+        if (!externalData || typeof externalData !== "object") {
+          return reply
+            .code(400)
+            .send({ error: "Invalid external subdomain data" });
+        }
+
+        if (!("subdomains" in externalData)) {
+          return reply
+            .code(400)
+            .send({ error: "No subdomains in external data" });
+        }
+
+        const subdomains = externalData.subdomains;
+
+        // Now use AJV to validate using our schema
+        if (!validateSubdomains(subdomains)) {
+          const errors = validateSubdomains.errors
+            .map((err) => `${err.instancePath} ${err.message}`)
+            .join(", ");
+          return reply
+            .code(400)
+            .send({ error: "Invalid subdomains schema: " + errors });
+        }
+
+        return reply.send({ subdomains });
+      } catch (error) {
+        request.log.error(error);
+        return reply.code(400).send({ error: error.message });
+      }
+    } else if ("subdomains" in decodedZonefile) {
+      // Local subdomains (old or new format). If you want, you can also validate them with AJV here.
+      // For simplicity, we trust isValidZonefileFormat here, but you could double-check with AJV if needed.
+      return reply.send({ subdomains: decodedZonefile.subdomains });
+    } else {
+      return reply
+        .code(400)
+        .send({ error: "No subdomains or external link found" });
+    }
+  },
 };
 
 // Route registration
@@ -1652,6 +1924,10 @@ function registerRoutes() {
   fastify.get(
     "/namespaces/:namespace/rare-names",
     createNetworkHandler(handlers.getRarestNames)
+  );
+  fastify.get(
+    "/subdomains/:full_name",
+    createNetworkHandler(handlers.getSubdomains)
   );
 
   // Testnet routes (same endpoints with /testnet prefix)
@@ -1746,7 +2022,11 @@ function registerRoutes() {
   );
   fastify.get(
     "/testnet/namespaces/:namespace/rare-names",
-    createNetworkHandler
+    createNetworkHandler(handlers.getRarestNames)
+  );
+  fastify.get(
+    "/testnet/subdomains/:full_name",
+    createNetworkHandler(handlers.getSubdomains)
   );
 }
 
