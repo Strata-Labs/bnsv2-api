@@ -1882,6 +1882,171 @@ const handlers = {
       btc: decodedZonefile.btc,
     });
   },
+  // 27. Get a single subdomain
+  getSingleSubdomain: async (request, reply, { schema, network }) => {
+    const fullSubdomain = request.params.full_subdomain;
+
+    const firstDotIndex = fullSubdomain.indexOf(".");
+    if (firstDotIndex < 0) {
+      return reply.code(400).send({ error: "Invalid subdomain format" });
+    }
+
+    const subLabel = fullSubdomain.slice(0, firstDotIndex);
+    const parentName = fullSubdomain.slice(firstDotIndex + 1);
+
+    const [name_string, namespace_string] = parentName.split(".");
+    if (!name_string || !namespace_string) {
+      return reply.code(400).send({ error: "Invalid parent name format" });
+    }
+
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
+    const parentResult = await pool.query(
+      `SELECT zonefile, owner
+     FROM ${schema}.names
+     WHERE name_string = $1
+       AND namespace_string = $2
+       AND owner IS NOT NULL
+       AND revoked = false
+       AND (renewal_height = 0 OR renewal_height > $3)`,
+      [name_string, namespace_string, currentBurnBlock]
+    );
+
+    if (parentResult.rows.length === 0) {
+      return reply
+        .code(404)
+        .send({ error: "Parent name not found, expired, or revoked" });
+    }
+
+    const { zonefile, owner } = parentResult.rows[0];
+    const decodedZonefile = decodeZonefile(zonefile);
+    if (!decodedZonefile) {
+      return reply.code(404).send({ error: "No zonefile found" });
+    }
+
+    if (!isValidZonefileFormat(decodedZonefile)) {
+      return reply.code(400).send({ error: "Invalid zonefile format" });
+    }
+
+    if (decodedZonefile.owner !== owner) {
+      return reply.code(400).send({ error: "Zonefile needs to be updated" });
+    }
+
+    let allSubdomains;
+    if (
+      "externalSubdomainFile" in decodedZonefile &&
+      typeof decodedZonefile.externalSubdomainFile === "string"
+    ) {
+      try {
+        const externalData = await fetchExternalSubdomains(
+          decodedZonefile.externalSubdomainFile
+        );
+        allSubdomains = externalData.subdomains;
+      } catch (error) {
+        request.log.error(error);
+        return reply.code(400).send({ error: error.message });
+      }
+    } else if ("subdomains" in decodedZonefile) {
+      allSubdomains = decodedZonefile.subdomains;
+    } else {
+      return reply
+        .code(400)
+        .send({ error: "No subdomains or external link found" });
+    }
+
+    if (!(subLabel in allSubdomains)) {
+      return reply.code(404).send({ error: "Subdomain not found" });
+    }
+
+    const subdomainData = allSubdomains[subLabel];
+
+    return reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
+      subdomain: fullSubdomain,
+      data: subdomainData,
+    });
+  },
+
+  // 28. Get only the owner of a single subdomain
+  getSingleSubdomainOwner: async (request, reply, { schema, network }) => {
+    const fullSubdomain = request.params.full_subdomain;
+    const firstDotIndex = fullSubdomain.indexOf(".");
+    if (firstDotIndex < 0) {
+      return reply.code(400).send({ error: "Invalid subdomain format" });
+    }
+
+    const subLabel = fullSubdomain.slice(0, firstDotIndex);
+    const parentName = fullSubdomain.slice(firstDotIndex + 1);
+    const [name_string, namespace_string] = parentName.split(".");
+    if (!name_string || !namespace_string) {
+      return reply.code(400).send({ error: "Invalid parent name format" });
+    }
+
+    const currentBurnBlock = await getCurrentBurnBlockHeight(network);
+    const parentResult = await pool.query(
+      `SELECT zonefile, owner
+     FROM ${schema}.names
+     WHERE name_string = $1
+       AND namespace_string = $2
+       AND owner IS NOT NULL
+       AND revoked = false
+       AND (renewal_height = 0 OR renewal_height > $3)`,
+      [name_string, namespace_string, currentBurnBlock]
+    );
+
+    if (parentResult.rows.length === 0) {
+      return reply
+        .code(404)
+        .send({ error: "Parent name not found, expired, or revoked" });
+    }
+
+    const { zonefile, owner } = parentResult.rows[0];
+    const decodedZonefile = decodeZonefile(zonefile);
+    if (!decodedZonefile) {
+      return reply.code(404).send({ error: "No zonefile found" });
+    }
+
+    if (!isValidZonefileFormat(decodedZonefile)) {
+      return reply.code(400).send({ error: "Invalid zonefile format" });
+    }
+
+    if (decodedZonefile.owner !== owner) {
+      return reply.code(400).send({ error: "Zonefile needs to be updated" });
+    }
+
+    let allSubdomains;
+    if (
+      "externalSubdomainFile" in decodedZonefile &&
+      typeof decodedZonefile.externalSubdomainFile === "string"
+    ) {
+      try {
+        const externalData = await fetchExternalSubdomains(
+          decodedZonefile.externalSubdomainFile
+        );
+        allSubdomains = externalData.subdomains;
+      } catch (error) {
+        request.log.error(error);
+        return reply.code(400).send({ error: error.message });
+      }
+    } else if ("subdomains" in decodedZonefile) {
+      allSubdomains = decodedZonefile.subdomains;
+    } else {
+      return reply
+        .code(400)
+        .send({ error: "No subdomains or external link found" });
+    }
+
+    if (!(subLabel in allSubdomains)) {
+      return reply.code(404).send({ error: "Subdomain not found" });
+    }
+
+    const subdomainData = allSubdomains[subLabel];
+
+    return reply.send({
+      ...(network === "testnet" && { network: "testnet" }),
+      subdomain: fullSubdomain,
+      owner: subdomainData.owner,
+    });
+  },
 };
 
 // Route registration
@@ -1963,6 +2128,14 @@ function registerRoutes() {
   fastify.get(
     "/btc-address/:full_name",
     createNetworkHandler(handlers.getBtcAddress)
+  );
+  fastify.get(
+    "/subdomain/:full_subdomain",
+    createNetworkHandler(handlers.getSingleSubdomain)
+  );
+  fastify.get(
+    "/subdomain/:full_subdomain/owner",
+    createNetworkHandler(handlers.getSingleSubdomainOwner)
   );
 
   // Testnet routes (same endpoints with /testnet prefix)
@@ -2066,6 +2239,14 @@ function registerRoutes() {
   fastify.get(
     "/testnet/btc-address/:full_name",
     createNetworkHandler(handlers.getBtcAddress)
+  );
+  fastify.get(
+    "/testnet/subdomain/:full_subdomain",
+    createNetworkHandler(handlers.getSingleSubdomain)
+  );
+  fastify.get(
+    "/testnet/subdomain/:full_subdomain/owner",
+    createNetworkHandler(handlers.getSingleSubdomainOwner)
   );
 }
 
