@@ -2254,8 +2254,8 @@ function registerRoutes() {
 const start = async () => {
   try {
     registerRoutes();
-    await fastify.listen({ port: 3000 });
-    fastify.log.info(`Server is running at http://localhost:3000`);
+    await fastify.listen({ port: 3010 });
+    fastify.log.info(`Server is running at http://localhost:3010`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
