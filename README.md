@@ -1,223 +1,213 @@
-# BNS V2 API Endpoints
+# BNS V2 API Documentation
 
-Base URL: `https://api.bnsv2.com`
+## Base URL
+`https://api.bnsv2.com`
 
-For all testnet calls preppend to the endpoint /testnet
+For testnet, prepend `/testnet` to any endpoint (e.g., `/testnet/names` instead of `/names`).
 
-Ex.
+## Core Endpoints
 
-```http
-GET /names
-GET /testnet/names
-```
+### Names
 
-### 1. List All Names
-
+1. **List All Names**
 ```http
 GET /names
 ```
 
-Lists all BNS names regardless of status.
-
-### 2. List Valid Names
-
+2. **List Valid Names**
 ```http
 GET /names/valid
 ```
 
-Lists only valid (not expired/revoked) names.
-
-### 3. List Expired Names
-
+3. **List Expired Names**
 ```http
 GET /names/expired
 ```
 
-Lists expired names.
-
-### 4. List Revoked Names
-
+4. **List Revoked Names**
 ```http
 GET /names/revoked
 ```
 
-Lists revoked names.
+### Address-Specific Name Queries
 
-### 5. List Valid Names for Address
-
+5. **List Valid Names for Address**
 ```http
 GET /names/address/{address}/valid
 ```
 
-Returns valid names owned by address.
-
-### 6. List Expired Names for Address
-
+6. **List Expired Names for Address**
 ```http
 GET /names/address/{address}/expired
 ```
 
-Returns expired names owned by address.
-
-### 7. List Names About to Expire for Address
-
+7. **List Names About to Expire for Address**
 ```http
 GET /names/address/{address}/expiring-soon
 ```
-
 Returns names expiring within 4320 blocks.
 
-### 8. List Revoked Names for Address
-
+8. **List Revoked Names for Address**
 ```http
 GET /names/address/{address}/revoked
 ```
 
-Returns revoked names owned by address.
+### Name Operations
 
-### 9. Get Name Details
-
+9. **Get Name Details**
 ```http
 GET /names/{full_name}
 ```
 
-Returns detailed information about a name.
-
-### 10. List All Namespaces
-
-```http
-GET /namespaces
-```
-
-Returns information about all namespaces.
-
-### 11. List Names in Namespace
-
+10. **List Names in Namespace**
 ```http
 GET /names/namespace/{namespace}
 ```
 
-Returns all names in a specific namespace.
-
-### 12. Resolve Name
-
+11. **Resolve Name**
 ```http
 GET /resolve-name/{full_name}
 ```
 
-Returns zonefile if available.
-
-### 13. Get Namespace Details
-
-```http
-GET /namespaces/{namespace}
-```
-
-Returns detailed namespace information.
-
-### 14. Check Name Registration Availability
-
+12. **Check Name Registration Availability**
 ```http
 GET /names/{namespace}/{name}/can-register
 ```
 
-Checks if a name can be registered.
-
-### 15. Get Last Token ID
-
-```http
-GET /token/last-id
-```
-
-Returns the last minted token ID.
-
-### 16. Get Name Renewal Status
-
+13. **Get Name Renewal Status**
 ```http
 GET /names/{full_name}/renewal
 ```
 
-Returns renewal information for a name.
-
-### 17. Check Name Resolution Status
-
+14. **Check Name Resolution Status**
 ```http
 GET /names/{full_name}/can-resolve
 ```
 
-Checks if a name can be resolved.
-
-### 18. Get Name Owner
-
+15. **Get Name Owner**
 ```http
 GET /names/{full_name}/owner
 ```
 
-Returns current owner of a name.
+### Token Operations
 
-### 19. Get Token Owner
+16. **Get Last Token ID**
+```http
+GET /token/last-id
+```
 
+17. **Get Token Owner**
 ```http
 GET /tokens/{id}/owner
 ```
 
-Returns owner of a specific token ID.
-
-### 20. Get Token ID from Name
-
+18. **Get Token ID from Name**
 ```http
 GET /names/{full_name}/id
 ```
 
-Returns token ID for a specific name.
-
-### 21. Get Name from Token ID
-
+19. **Get Name from Token ID**
 ```http
 GET /tokens/{id}/name
 ```
 
-Returns name associated with token ID.
-
-### 22. Get Name Info from Token ID
-
+20. **Get Name Info from Token ID**
 ```http
 GET /tokens/{id}/info
 ```
 
-Returns detailed information about a name by its token ID.
+### Namespace Operations
 
-### 23. Get Name Rarity Metrics
+21. **List All Namespaces**
+```http
+GET /namespaces
+```
 
+22. **Get Namespace Details**
+```http
+GET /namespaces/{namespace}
+```
+
+### Rarity System
+
+23. **Get Name Rarity Metrics**
 ```http
 GET /names/{full_name}/rarity
 ```
 
-Returns rarity score and metrics for a name.
-
-### 24. Get Rarest Names in Namespace
-
+24. **Get Rarest Names in Namespace**
 ```http
 GET /namespaces/{namespace}/rare-names
 ```
 
-Returns the rarest names in a namespace.
+## Subdomain Endpoints
+
+### Subdomain Operations
+
+1. **Get All Subdomains**
+```http
+GET /subdomains/{full_name}
+```
+
+Response Format:
+```json
+{
+  "subdomains": {
+    "sub1": {
+      "owner": "SP2ZNGJ85ENDY6QRHQ5P2D4FXQJ6INMT00GBGJ2QX",
+      "general": "General profile information",
+      "twitter": "@example",
+      "url": "https://example.com",
+      "nostr": "npub...",
+      "lightning": "lightning-address",
+      "btc": "bc1..."
+    }
+  }
+}
+```
+
+2. **Get Single Subdomain**
+```http
+GET /subdomain/{full_subdomain}
+```
+
+3. **Get Subdomain Owner**
+```http
+GET /subdomain/{full_subdomain}/owner
+```
+
+## BTC Address Resolution
+
+### Get BTC Address
+```http
+GET /btc-address/{full_name}
+```
+
+Response Format:
+```json
+{
+  "btc": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+}
+```
+
+Testnet Response:
+```json
+{
+  "network": "testnet",
+  "btc": "tb1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+}
+```
 
 ## Common Parameters
-
 All list endpoints support:
-
 - `limit` (default: 50)
 - `offset` (default: 0)
 
-## Rarity System
-
-The BNS rarity system evaluates names using the following criteria:
+## Rarity Scoring System
 
 ### Scoring Factors
 
 1. **Name Length**
-
    - 1-3 characters: +10 points (Extremely Rare)
    - 4-5 characters: +30 points (Very Rare)
    - 6-7 characters: +50 points (Moderate)
@@ -225,7 +215,6 @@ The BNS rarity system evaluates names using the following criteria:
    - 11+ characters: +90 points (Very Common)
 
 2. **Character Patterns** (20% weight each)
-
    - Numeric-only names
    - Letter-only names
    - Special character presence
@@ -235,13 +224,51 @@ The BNS rarity system evaluates names using the following criteria:
    - Repeating characters: +5 points (decreases rarity)
 
 ### Rarity Classifications
-
 Final Score (0-100):
-
 - 0-20: Ultra Rare
 - 21-40: Rare
 - 41-60: Uncommon
 - 61-80: Common
 - 81-100: Very Common
 
-Lower scores indicate rarer names.
+## Error Responses
+
+Common error responses for all endpoints:
+
+### 404 Not Found
+```json
+{
+  "error": "Name not found, expired or revoked"
+}
+```
+
+### 400 Bad Request
+```json
+{
+  "error": "Invalid zonefile format"
+}
+```
+
+## Integration Example
+
+```javascript
+async function resolveBtcAddress(bnsName) {
+  try {
+    const response = await fetch(`https://api.bnsv2.com/btc-address/${bnsName}`);
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to resolve BTC address');
+    }
+    const data = await response.json();
+    return data.btc;
+  } catch (error) {
+    console.error('Error resolving BTC address:', error);
+    throw error;
+  }
+}
+
+// Usage example
+resolveBtcAddress('satoshi.btc')
+  .then(btcAddress => console.log('BTC Address:', btcAddress))
+  .catch(error => console.error('Error:', error));
+```
