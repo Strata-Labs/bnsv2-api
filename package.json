@@ -6,24 +6,26 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "nodemon server.js",
+    "test": "node tests/api-comparison.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@fastify/cors": "^8.4.1",
-    "@fastify/rate-limit": "^7.6.0",
-    "axios": "^1.7.7",
-    "dotenv": "^16.4.5",
-    "fastify": "^4.25.0",
+    "@fastify/cors": "^8.3.0",
+    "@fastify/rate-limit": "^8.0.3",
+    "ajv": "^8.12.0",
+    "dotenv": "^16.3.1",
+    "fastify": "^4.22.2",
+    "node-cache": "^5.1.2",
     "node-fetch": "^3.3.2",
-    "pg": "^8.13.1",
-    "s-expression": "^3.1.1"
+    "pg": "^8.11.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
     "ts-node": "^10.9.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "nodemon": "^3.0.1"
   }
 }
