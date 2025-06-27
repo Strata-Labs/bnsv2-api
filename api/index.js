@@ -1,18 +1,13 @@
 import Fastify from "fastify";
 import rateLimit from "@fastify/rate-limit";
-import dotenv from "dotenv";
 import cors from "@fastify/cors";
-import { checkPoolHealth } from "./db.js";
-import { setupCaching } from "./cache-middleware.js";
-import nameHandlers from "./handlers/name-handlers.js";
-import namespaceHandlers from "./handlers/namespace-handlers.js";
-import tokenHandlers from "./handlers/token-handlers.js";
-import subdomainHandlers from "./handlers/subdomain-handlers.js";
-import zonefileHandlers from "./handlers/zonefile-handlers.js";
+import { checkPoolHealth } from "../db.js";
+import { setupCaching } from "../cache-middleware.js";
+import handlers from "../handlers/index.js";
 
-dotenv.config();
-
-const fastify = Fastify({ logger: true });
+const fastify = Fastify({
+  logger: false,
+});
 
 await fastify.register(cors, {
   origin: "*",
@@ -20,9 +15,8 @@ await fastify.register(cors, {
 });
 
 await fastify.register(rateLimit, {
-  max: 10000,
+  max: 1000,
   timeWindow: "1 minute",
-  allowList: ["127.0.0.1"],
 });
 
 setupCaching(fastify);
@@ -64,14 +58,6 @@ function createNetworkHandler(handler) {
     }
   };
 }
-
-const handlers = {
-  ...nameHandlers,
-  ...namespaceHandlers,
-  ...tokenHandlers,
-  ...subdomainHandlers,
-  ...zonefileHandlers,
-};
 
 fastify.get("/health", async (request, reply) => {
   const isMainDbHealthy = await checkPoolHealth();
@@ -296,15 +282,9 @@ function registerRoutes() {
   );
 }
 
-const start = async () => {
-  try {
-    registerRoutes();
-    await fastify.listen({ port: 3000, host: "0.0.0.0" });
-    fastify.log.info(`Server is running at http://localhost:3000`);
-  } catch (err) {
-    fastify.log.error(err);
-    process.exit(1);
-  }
-};
+registerRoutes();
 
-start();
+export default async function handler(req, res) {
+  await fastify.ready();
+  fastify.server.emit("request", req, res);
+}
