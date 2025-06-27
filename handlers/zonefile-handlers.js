@@ -330,7 +330,7 @@ const zonefileHandlers = {
         .send({ error: "Name not found, expired or revoked" });
     }
 
-    const { zonefile } = result.rows[0];
+    const { zonefile, owner } = result.rows[0];
 
     if (!zonefile) {
       return reply
@@ -343,6 +343,12 @@ const zonefileHandlers = {
 
     if (!decodedZonefile) {
       return reply.status(400).send({ error: "Unable to decode zonefile" });
+    }
+
+    if (decodedZonefile.owner !== owner) {
+      return reply
+        .status(400)
+        .send({ error: "Zonefile owner does not match name owner" });
     }
 
     const response = {
