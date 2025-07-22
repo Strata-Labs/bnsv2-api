@@ -99,12 +99,14 @@ export async function getNameStatus(nameInfo, network) {
     return "revoked";
   }
 
-  if (nameInfo.renewal_height === 0) {
+  // Convert renewal_height to number for comparison
+  const renewalHeight = parseInt(nameInfo.renewal_height) || 0;
+
+  if (renewalHeight === 0) {
     return "active";
   }
 
   const currentBurnBlock = await getCurrentBurnBlockHeight(network);
-  const renewalHeight = parseInt(nameInfo.renewal_height);
 
   if (currentBurnBlock > renewalHeight + 5000) {
     return "expired";

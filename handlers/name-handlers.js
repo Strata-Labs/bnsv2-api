@@ -52,11 +52,9 @@ const nameHandlers = {
 
     const nameData = result.rows[0];
     const status = await getNameStatus(nameData, network);
-    const isValid = status === "active" || status === "expiring-soon";
 
     const formattedResponse = {
       ...nameData,
-      is_valid: isValid,
     };
 
     reply.send({
