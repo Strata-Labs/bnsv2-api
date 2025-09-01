@@ -99,6 +99,18 @@ export async function getNameStatus(nameInfo, network) {
     return "revoked";
   }
 
+  const namespaceInfo = await getNamespaceInfo(
+    nameInfo.namespace_string,
+    network
+  );
+  if (
+    namespaceInfo &&
+    namespaceInfo.namespace_manager !== "none" &&
+    namespaceInfo.namespace_manager !== null
+  ) {
+    return "active"; // Managed names are always active unless revoked
+  }
+
   if (nameInfo.renewal_height === 0) {
     return "active";
   }

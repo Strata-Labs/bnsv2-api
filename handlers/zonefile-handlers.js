@@ -1,4 +1,3 @@
-// zonefile-handlers.js - UPDATED VERSION
 import { getCurrentBurnBlockHeight } from "../burnblock-service.js";
 import { getPool } from "../db.js";
 import { decodeZonefile } from "../zonefile-utils.js";
@@ -8,7 +7,6 @@ const CACHE_TTL = {
   ZONEFILE_DATA: 300,
 };
 
-// Valid image extensions for PFP validation
 const VALID_IMAGE_EXTENSIONS = [
   ".jpg",
   ".jpeg",
@@ -20,7 +18,6 @@ const VALID_IMAGE_EXTENSIONS = [
   ".tiff",
 ];
 
-// Valid social platforms
 const VALID_SOCIAL_PLATFORMS = [
   "x",
   "twitter",
@@ -36,7 +33,6 @@ const VALID_SOCIAL_PLATFORMS = [
   "reddit",
 ];
 
-// Valid network types for addresses
 const VALID_NETWORKS = [
   "btc",
   "bitcoin",
@@ -54,7 +50,6 @@ const VALID_NETWORKS = [
   "dogecoin",
 ];
 
-// Valid address types
 const VALID_ADDRESS_TYPES = [
   "payment",
   "ordinal",
@@ -64,7 +59,7 @@ const VALID_ADDRESS_TYPES = [
 ];
 
 function isValidImageUrl(url) {
-  if (typeof url !== "string" || url.trim() === "") return true; // Empty is allowed
+  if (typeof url !== "string" || url.trim() === "") return true;
 
   try {
     const urlObj = new URL(url);
@@ -78,7 +73,7 @@ function isValidImageUrl(url) {
 }
 
 function isValidUrl(url) {
-  if (typeof url !== "string" || url.trim() === "") return true; // Empty is allowed
+  if (typeof url !== "string" || url.trim() === "") return true;
 
   try {
     const urlObj = new URL(url);
@@ -89,7 +84,6 @@ function isValidUrl(url) {
 }
 
 function validateProfileZonefile(zonefile) {
-  // Check if it's an object
   if (
     typeof zonefile !== "object" ||
     zonefile === null ||
@@ -98,7 +92,6 @@ function validateProfileZonefile(zonefile) {
     return { valid: false, error: "Zonefile must be an object" };
   }
 
-  // Required fields
   if (typeof zonefile.owner !== "string" || zonefile.owner.trim() === "") {
     return {
       valid: false,
@@ -106,7 +99,6 @@ function validateProfileZonefile(zonefile) {
     };
   }
 
-  // Optional string fields
   const stringFields = ["btc", "bio", "website", "name", "location"];
   for (const field of stringFields) {
     if (field in zonefile && typeof zonefile[field] !== "string") {
@@ -114,7 +106,6 @@ function validateProfileZonefile(zonefile) {
     }
   }
 
-  // Validate PFP field (must be valid image URL)
   if ("pfp" in zonefile) {
     if (typeof zonefile.pfp !== "string") {
       return { valid: false, error: "Field 'pfp' must be a string" };
@@ -128,12 +119,10 @@ function validateProfileZonefile(zonefile) {
     }
   }
 
-  // Validate website field
   if ("website" in zonefile && !isValidUrl(zonefile.website)) {
     return { valid: false, error: "Field 'website' must be a valid URL" };
   }
 
-  // Validate social array
   if ("social" in zonefile) {
     if (!Array.isArray(zonefile.social)) {
       return { valid: false, error: "Field 'social' must be an array" };
@@ -172,7 +161,6 @@ function validateProfileZonefile(zonefile) {
     }
   }
 
-  // Validate addresses array
   if ("addresses" in zonefile) {
     if (!Array.isArray(zonefile.addresses)) {
       return { valid: false, error: "Field 'addresses' must be an array" };
@@ -220,7 +208,6 @@ function validateProfileZonefile(zonefile) {
     }
   }
 
-  // Validate meta array
   if ("meta" in zonefile) {
     if (!Array.isArray(zonefile.meta)) {
       return { valid: false, error: "Field 'meta' must be an array" };
@@ -251,7 +238,6 @@ function validateProfileZonefile(zonefile) {
     }
   }
 
-  // Validate subdomains
   if ("subdomains" in zonefile) {
     if (
       typeof zonefile.subdomains !== "object" ||
@@ -269,7 +255,6 @@ function validateProfileZonefile(zonefile) {
         };
       }
 
-      // Recursively validate subdomain (it should follow the same structure but without subdomains)
       const subValidation = validateProfileZonefile({ ...subData });
       if (!subValidation.valid) {
         return {
@@ -280,7 +265,6 @@ function validateProfileZonefile(zonefile) {
     }
   }
 
-  // Validate externalSubdomainsFile
   if ("externalSubdomainsFile" in zonefile) {
     if (typeof zonefile.externalSubdomainsFile !== "string") {
       return {
@@ -300,7 +284,6 @@ function validateProfileZonefile(zonefile) {
 }
 
 const zonefileHandlers = {
-  // Endpoint 1: Get decoded raw zonefile data
   getRawZonefile: async (request, reply, { schema, network }) => {
     const [nameString, namespaceString] = request.params.full_name.split(".");
     const cacheKey = `raw_zonefile_${network}_${nameString}.${namespaceString}`;
@@ -338,7 +321,6 @@ const zonefileHandlers = {
         .send({ error: "No zonefile found for this name" });
     }
 
-    // Decode the zonefile
     const decodedZonefile = decodeZonefile(zonefile);
 
     if (!decodedZonefile) {
@@ -354,14 +336,13 @@ const zonefileHandlers = {
     const response = {
       ...(network === "testnet" && { network: "testnet" }),
       full_name: `${nameString}.${namespaceString}`,
-      zonefile: decodedZonefile, // Return the decoded zonefile
+      zonefile: decodedZonefile,
     };
 
     cache.set(cacheKey, response, CACHE_TTL.ZONEFILE_DATA);
     reply.send(response);
   },
 
-  // Endpoint 2: Get and validate profile zonefile
   getProfileZonefile: async (request, reply, { schema, network }) => {
     const [nameString, namespaceString] = request.params.full_name.split(".");
     const cacheKey = `profile_zonefile_${network}_${nameString}.${namespaceString}`;
@@ -399,14 +380,12 @@ const zonefileHandlers = {
         .send({ error: "No zonefile found for this name" });
     }
 
-    // Decode the zonefile
     const decodedZonefile = decodeZonefile(zonefile);
 
     if (!decodedZonefile) {
       return reply.status(400).send({ error: "Unable to decode zonefile" });
     }
 
-    // Validate the profile format
     const validation = validateProfileZonefile(decodedZonefile);
 
     if (!validation.valid) {
@@ -416,7 +395,6 @@ const zonefileHandlers = {
       });
     }
 
-    // Check owner consistency
     if (decodedZonefile.owner !== owner) {
       return reply
         .status(400)
