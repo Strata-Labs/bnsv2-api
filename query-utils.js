@@ -99,14 +99,24 @@ export async function getNameStatus(nameInfo, network) {
     return "revoked";
   }
 
-  // Convert renewal_height to number for comparison
-  const renewalHeight = parseInt(nameInfo.renewal_height) || 0;
+  const namespaceInfo = await getNamespaceInfo(
+    nameInfo.namespace_string,
+    network
+  );
+  if (
+    namespaceInfo &&
+    namespaceInfo.namespace_manager !== "none" &&
+    namespaceInfo.namespace_manager !== null
+  ) {
+    return "active"; // Managed names are always active unless revoked
+  }
 
-  if (renewalHeight === 0) {
+  if (nameInfo.renewal_height === 0) {
     return "active";
   }
 
   const currentBurnBlock = await getCurrentBurnBlockHeight(network);
+  const renewalHeight = parseInt(nameInfo.renewal_height);
 
   if (currentBurnBlock > renewalHeight + 5000) {
     return "expired";

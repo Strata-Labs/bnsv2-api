@@ -24,6 +24,20 @@ const nameHandlers = {
     const currentBurnBlock = await getCurrentBurnBlockHeight(network);
 
     const pool = getPool();
+
+    const namespaceResult = await pool.query(
+      `SELECT namespace_manager, lifetime FROM ${schema}.namespaces WHERE namespace_string = $1`,
+      [namespaceString]
+    );
+
+    if (namespaceResult.rows.length === 0) {
+      return reply.status(404).send({ error: "Namespace not found" });
+    }
+
+    const { namespace_manager, lifetime } = namespaceResult.rows[0];
+    const isManaged =
+      namespace_manager !== "none" && namespace_manager !== null;
+
     const result = await pool.query(
       `SELECT 
       name_string,
@@ -37,13 +51,14 @@ const nameHandlers = {
       imported_at,
       preordered_by,
       CASE 
+        WHEN $4 = true THEN true  -- If managed namespace, always valid (unless revoked)
         WHEN renewal_height = 0 THEN true
         WHEN renewal_height > $3 THEN true
         ELSE false
       END as is_valid
      FROM ${schema}.names 
      WHERE name_string = $1 AND namespace_string = $2`,
-      [nameString, namespaceString, currentBurnBlock]
+      [nameString, namespaceString, currentBurnBlock, isManaged]
     );
 
     if (result.rows.length === 0) {
@@ -51,16 +66,30 @@ const nameHandlers = {
     }
 
     const nameData = result.rows[0];
-    const status = await getNameStatus(nameData, network);
+
+    let status;
+    if (nameData.revoked) {
+      status = "revoked";
+    } else if (isManaged) {
+      status = "active";
+    } else {
+      status = await getNameStatus(nameData, network);
+    }
+
+    const isValid =
+      !nameData.revoked &&
+      (isManaged || status === "active" || status === "expiring-soon");
 
     const formattedResponse = {
       ...nameData,
+      is_valid: isValid,
     };
 
     reply.send({
       ...(network === "testnet" && { network: "testnet" }),
       current_burn_block: currentBurnBlock,
       status: status,
+      is_managed: isManaged,
       data: formattedResponse,
     });
   },
