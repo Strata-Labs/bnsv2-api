@@ -46,7 +46,7 @@ export async function isNameValid(nameInfo, network) {
     return false;
   }
 
-  if (nameInfo.renewal_height === 0) {
+  if (parseInt(nameInfo.renewal_height) === 0) {
     return true;
   }
 
@@ -111,7 +111,7 @@ export async function getNameStatus(nameInfo, network) {
     return "active"; // Managed names are always active unless revoked
   }
 
-  if (nameInfo.renewal_height === 0) {
+  if (parseInt(nameInfo.renewal_height) === 0) {
     return "active";
   }
 
