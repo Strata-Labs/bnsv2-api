@@ -1,7 +1,7 @@
 import { getCurrentBurnBlockHeight } from "../burnblock-service.js";
+import cache from "../cache.js";
 import { getPool } from "../db.js";
 import { decodeZonefile } from "../zonefile-utils.js";
-import cache from "../cache.js";
 
 const CACHE_TTL = {
   ZONEFILE_DATA: 300,

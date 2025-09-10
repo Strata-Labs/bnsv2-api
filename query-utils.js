@@ -1,6 +1,6 @@
-import { getPool } from "./db.js";
 import { getCurrentBurnBlockHeight } from "./burnblock-service.js";
 import cache from "./cache.js";
+import { getPool } from "./db.js";
 
 const CACHE_TTL = {
   NAMESPACE_INFO: 3600,

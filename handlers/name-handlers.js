@@ -1,12 +1,11 @@
 import { getCurrentBurnBlockHeight } from "../burnblock-service.js";
+import cache from "../cache.js";
 import { getPool } from "../db.js";
 import {
   getNameInfo,
   getNamespaceInfo,
   getNameStatus,
-  formatNameResponse,
 } from "../query-utils.js";
-import cache from "../cache.js";
 import {
   getAndValidateZonefile,
   hasValidBtcAddress,
