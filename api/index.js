@@ -1,8 +1,8 @@
-import Fastify from "fastify";
-import rateLimit from "@fastify/rate-limit";
 import cors from "@fastify/cors";
-import { checkPoolHealth } from "../db.js";
+import rateLimit from "@fastify/rate-limit";
+import Fastify from "fastify";
 import { setupCaching } from "../cache-middleware.js";
+import { checkPoolHealth } from "../db.js";
 import handlers from "../handlers/index.js";
 
 const fastify = Fastify({
@@ -42,7 +42,14 @@ function createNetworkHandler(handler) {
     try {
       return await handler(request, reply, { schema, network, apiUrl });
     } catch (error) {
-      fastify.log.error(error);
+      fastify.log.error({
+        error: error.message,
+        stack: error.stack,
+        url: request.url,
+        method: request.method,
+        params: request.params,
+        query: request.query,
+      });
 
       if (error.code === "23505") {
         reply.status(409).send({ error: "Conflict: Resource already exists" });
@@ -53,7 +60,12 @@ function createNetworkHandler(handler) {
       } else if (error.message && error.message.includes("timeout")) {
         reply.status(504).send({ error: "Request timed out" });
       } else {
-        reply.status(500).send({ error: "Internal Server Error" });
+        reply.status(500).send({
+          error: "Internal Server Error",
+          ...(process.env.NODE_ENV === "development" && {
+            details: error.message,
+          }),
+        });
       }
     }
   };

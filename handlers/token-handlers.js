@@ -1,7 +1,7 @@
 import { getCurrentBurnBlockHeight } from "../burnblock-service.js";
+import cache from "../cache.js";
 import { getPool } from "../db.js";
 import { getNamespaceInfo } from "../query-utils.js";
-import cache from "../cache.js";
 
 const CACHE_TTL = {
   TOKEN_DATA: 300,

@@ -1,9 +1,9 @@
+import Ajv from "ajv";
+import fetch from "node-fetch";
 import { getCurrentBurnBlockHeight } from "../burnblock-service.js";
+import cache from "../cache.js";
 import { getPool } from "../db.js";
 import { getAndValidateZonefile } from "../zonefile-utils.js";
-import cache from "../cache.js";
-import fetch from "node-fetch";
-import Ajv from "ajv";
 
 const CACHE_TTL = {
   SUBDOMAIN_LIST: 120,
